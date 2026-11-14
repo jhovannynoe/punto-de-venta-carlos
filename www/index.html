@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Punto de Venta Carlos | Web & APK</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo">PV</div>
+        <div>
+          <h1>Punto de Venta</h1>
+          <div class="status-row">
+            <span id="db-status-dot" class="status-dot connecting"></span>
+            <span id="db-status-text">Conectando a Neon...</span>
+          </div>
+        </div>
+      </div>
+
+      <nav class="main-nav">
+        <button class="nav-btn active" data-tab="pos">
+          <span class="nav-icon">🛒</span>
+          <span>Caja / Cobrar</span>
+        </button>
+        <button class="nav-btn" data-tab="catalog">
+          <span class="nav-icon">📦</span>
+          <span>Catálogo</span>
+        </button>
+        <button class="nav-btn" data-tab="history">
+          <span class="nav-icon">📊</span>
+          <span>Corte / Historial</span>
+        </button>
+      </nav>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="main-content">
+      <!-- TAB 1: CAJA / COBRAR -->
+      <section id="tab-pos" class="tab-view active">
+        <div class="pos-layout">
+          <!-- Left: Products / Services Grid -->
+          <div class="pos-catalog-pane">
+            <div class="pos-toolbar">
+              <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="pos-search" placeholder="Buscar producto o servicio..." autocomplete="off" />
+              </div>
+              <button id="btn-quick-item" class="btn btn-accent">
+                ⚡ Concepto Libre
+              </button>
+            </div>
+
+            <div id="category-chips" class="category-chips"></div>
+
+            <div id="pos-products-grid" class="products-grid">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Right: Current Sale Cart -->
+          <aside class="pos-cart-pane">
+            <div class="cart-header">
+              <h2>Ticket Actual</h2>
+              <button id="btn-clear-cart" class="btn-text-danger" title="Vaciar carrito">Vaciar</button>
+            </div>
+
+            <div id="cart-items-list" class="cart-items-list">
+              <!-- Rendered dynamically -->
+            </div>
+
+            <div class="cart-footer">
+              <div class="cart-summary-row">
+                <span>Artículos / Servicios</span>
+                <strong id="cart-count">0</strong>
+              </div>
+              <div class="cart-total-row">
+                <span>TOTAL A COBRAR</span>
+                <strong id="cart-total">$0.00</strong>
+              </div>
+              <button id="btn-open-checkout" class="btn btn-primary btn-lg btn-block" disabled>
+                Cobrar <span id="btn-checkout-amount">$0.00</span>
+              </button>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- TAB 2: CATÁLOGO E INVENTARIO -->
+      <section id="tab-catalog" class="tab-view">
+        <div class="section-header">
+          <div>
+            <h2>Catálogo de Productos y Servicios</h2>
+            <p class="subtitle">Sincronizado en tiempo real con Neon PostgreSQL</p>
+          </div>
+          <button id="btn-new-product" class="btn btn-primary">
+            + Nuevo Producto / Servicio
+          </button>
+        </div>
+
+        <div class="catalog-filters">
+          <input type="text" id="catalog-search" class="input" placeholder="Filtrar catálogo por nombre o categoría..." />
+        </div>
+
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nombre / Concepto</th>
+                <th>Categoría</th>
+                <th>Tipo</th>
+                <th>Precio</th>
+                <th>Existencia (Stock)</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="catalog-table-body">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- TAB 3: HISTORIAL Y CORTE DE CAJA -->
+      <section id="tab-history" class="tab-view">
+        <div class="section-header">
+          <div>
+            <h2>Corte de Caja e Historial del Día</h2>
+            <p class="subtitle">Resumen de ingresos por método de pago y detalle de ventas</p>
+          </div>
+          <div class="history-controls">
+            <input type="date" id="history-date" class="input" />
+            <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
+            <button id="btn-print-corte" class="btn btn-accent">🖨️ Ver Corte de Caja</button>
+          </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card kpi-total">
+            <span class="kpi-label">Total Vendido del Día</span>
+            <strong id="kpi-total-sales" class="kpi-value">$0.00</strong>
+            <span id="kpi-sales-count" class="kpi-sub">0 ventas registradas</span>
+          </div>
+          <div class="kpi-card kpi-cash">
+            <span class="kpi-label">💵 Efectivo en Caja</span>
+            <strong id="kpi-cash-sales" class="kpi-value">$0.00</strong>
+            <span class="kpi-sub">Dinero físico recibido neto</span>
+          </div>
+          <div class="kpi-card kpi-card">
+            <span class="kpi-label">💳 Tarjeta / Transferencia</span>
+            <strong id="kpi-digital-sales" class="kpi-value">$0.00</strong>
+            <span class="kpi-sub">Cobros electrónicos</span>
+          </div>
+        </div>
+
+        <div id="sales-history-list" class="sales-history-list">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+    </main>
+
+    <!-- Mobile Sticky Cart Bar -->
+    <div id="mobile-cart-bar" class="mobile-cart-bar hidden">
+      <div>
+        <span id="mobile-cart-count">0 conceptos</span>
+        <strong id="mobile-cart-total">$0.00</strong>
+      </div>
+      <button id="btn-mobile-checkout" class="btn btn-primary">
+        Ver / Cobrar →
+      </button>
+    </div>
+  </div>
+
+  <!-- MODAL: COBRO / CHECKOUT -->
+  <div id="modal-checkout" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Confirmar Cobro</h3>
+        <button class="modal-close" data-close="modal-checkout">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="checkout-total-banner">
+          <span>Total a pagar</span>
+          <strong id="checkout-modal-total">$0.00</strong>
+        </div>
+
+        <label class="field-label">Método de pago</label>
+        <div class="payment-methods">
+          <button type="button" class="pay-method-btn active" data-method="efectivo">💵 Efectivo</button>
+          <button type="button" class="pay-method-btn" data-method="tarjeta">💳 Tarjeta</button>
+          <button type="button" class="pay-method-btn" data-method="transferencia">📲 Transferencia</button>
+        </div>
+
+        <div id="cash-payment-section" class="cash-section">
+          <label class="field-label" for="checkout-received">Monto recibido ($)</label>
+          <input type="number" id="checkout-received" class="input input-lg" step="0.01" min="0" placeholder="0.00" />
+
+          <div class="quick-cash-btns">
+            <button type="button" class="chip-btn" data-cash="exact">Exacto</button>
+            <button type="button" class="chip-btn" data-cash="50">$50</button>
+            <button type="button" class="chip-btn" data-cash="100">$100</button>
+            <button type="button" class="chip-btn" data-cash="200">$200</button>
+            <button type="button" class="chip-btn" data-cash="500">$500</button>
+            <button type="button" class="chip-btn" data-cash="1000">$1,000</button>
+          </div>
+
+          <div id="change-box" class="change-box">
+            <span>Cambio a entregar:</span>
+            <strong id="checkout-change">$0.00</strong>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label" for="checkout-note">Nota / Cliente (opcional)</label>
+          <input type="text" id="checkout-note" class="input" placeholder="Ej. Mesa 2, Cliente Juan, Servicio exprés..." />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-close="modal-checkout">Cancelar</button>
+        <button type="button" id="btn-confirm-sale" class="btn btn-success btn-lg">
+          ✅ Registrar Venta
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: CONCEPTO LIBRE / VENTA RÁPIDA -->
+  <div id="modal-quick-item" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>⚡ Agregar Concepto Libre</h3>
+        <button class="modal-close" data-close="modal-quick-item">✕</button>
+      </div>
+      <form id="form-quick-item" class="modal-body">
+        <div class="form-group">
+          <label class="field-label" for="quick-name">Descripción del servicio o producto</label>
+          <input type="text" id="quick-name" class="input" placeholder="Ej. Reparación especial, Cargo extra..." required />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="field-label" for="quick-price">Precio unitario ($)</label>
+            <input type="number" id="quick-price" class="input" step="0.01" min="0.01" placeholder="0.00" required />
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="quick-qty">Cantidad</label>
+            <input type="number" id="quick-qty" class="input" step="1" min="1" value="1" required />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close="modal-quick-item">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Agregar al Ticket</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CREAR / EDITAR PRODUCTO O SERVICIO -->
+  <div id="modal-product" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-product-title">Nuevo Producto / Servicio</h3>
+        <button class="modal-close" data-close="modal-product">✕</button>
+      </div>
+      <form id="form-product" class="modal-body">
+        <input type="hidden" id="prod-id" />
+        <div class="form-group">
+          <label class="field-label" for="prod-name">Nombre del producto o servicio *</label>
+          <input type="text" id="prod-name" class="input" placeholder="Ej. Corte de cabello, Consulta, Refresco..." required />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="field-label" for="prod-category">Categoría</label>
+            <input type="text" id="prod-category" class="input" placeholder="Ej. Servicios, General, Bebidas..." value="General" />
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="prod-price">Precio de venta ($) *</label>
+            <input type="number" id="prod-price" class="input" step="0.01" min="0" placeholder="0.00" required />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="prod-is-service" />
+            <span>Es un <strong>Servicio</strong> (no maneja límite de inventario/stock)</span>
+          </label>
+        </div>
+        <div id="prod-stock-group" class="form-group">
+          <label class="field-label" for="prod-stock">Cantidad en inventario (Stock actual)</label>
+          <input type="number" id="prod-stock" class="input" step="1" min="0" value="10" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close="modal-product">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Guardar en Neon</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: TICKET / CORTE IMPRIMIBLE -->
+  <div id="modal-receipt" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="receipt-title">Comprobante</h3>
+        <button class="modal-close" data-close="modal-receipt">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="receipt-content" class="receipt-paper"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-close="modal-receipt">Cerrar</button>
+        <button type="button" id="btn-print-receipt" class="btn btn-primary">🖨️ Imprimir / Guardar PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

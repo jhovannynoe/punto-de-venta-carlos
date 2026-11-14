@@ -1,0 +1,15 @@
+{
+  "name": "pos-carlos",
+  "version": "1.0.0",
+  "description": "Punto de Venta Sencillo Web y APK con Neon PostgreSQL",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "cap:sync": "npx.cmd cap sync"
+  },
+  "dependencies": {}
+}

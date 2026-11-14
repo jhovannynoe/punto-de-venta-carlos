@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: punto-de-venta-carlos
+    runtime: node
+    plan: free
+    buildCommand: echo "No build step required"
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false

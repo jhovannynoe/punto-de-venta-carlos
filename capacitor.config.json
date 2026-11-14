@@ -1,0 +1,9 @@
+{
+  "appId": "com.carlos.pos",
+  "appName": "Punto de Venta Carlos",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}
