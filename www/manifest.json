@@ -1,9 +1,18 @@
 {
   "name": "Punto de Venta Carlos",
   "short_name": "POS Carlos",
-  "start_url": "./index.html",
+  "description": "Sistema de Punto de Venta para PC y Móvil conectado a Neon",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
-  "orientation": "any"
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

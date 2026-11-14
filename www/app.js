@@ -964,6 +964,19 @@ async function initApp() {
   document.getElementById('btn-print-corte').addEventListener('click', showDailyCorteModal);
   document.getElementById('btn-print-receipt').addEventListener('click', () => window.print());
 
+  // Atajos de teclado para uso rápido en PC
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F2') {
+      e.preventDefault();
+      if (state.cart.length > 0) openCheckoutModal();
+    } else if (e.key === 'F4') {
+      e.preventDefault();
+      document.getElementById('btn-quick-item').click();
+    } else if (e.key === 'Escape') {
+      document.querySelectorAll('.modal-backdrop').forEach((m) => m.classList.add('hidden'));
+    }
+  });
+
   // Conectar a Neon
   const dotEl = document.getElementById('db-status-dot');
   const txtEl = document.getElementById('db-status-text');
