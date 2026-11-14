@@ -38,7 +38,7 @@ function parseBody(req) {
       if (!data) return resolve({});
       try {
         resolve(JSON.parse(data));
-      } catch (e) {
+      } catch {
         reject(new Error('JSON inválido'));
       }
     });
@@ -59,6 +59,78 @@ async function handleApi(req, res, urlObj) {
     if (pathname === '/api/health' && method === 'GET') {
       const rows = await query('SELECT NOW() AS server_time');
       return sendJson(res, 200, { ok: true, connected: true, serverTime: rows[0]?.server_time });
+    }
+
+    // GET /api/users (List active cashiers & admins)
+    if (pathname === '/api/users' && method === 'GET') {
+      const rows = await query(`
+        SELECT id, name, role, pin, created_at
+        FROM users
+        WHERE active = TRUE
+        ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name ASC
+      `);
+      return sendJson(res, 200, rows);
+    }
+
+    // POST /api/auth (Verify PIN login)
+    if (pathname === '/api/auth' && method === 'POST') {
+      const body = await parseBody(req);
+      const userId = Number(body.user_id || 0);
+      const pin = String(body.pin || '').trim();
+
+      const rows = await query(
+        'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
+        [userId, pin]
+      );
+      if (rows.length === 0) {
+        return sendJson(res, 401, { error: 'PIN incorrecto' });
+      }
+      return sendJson(res, 200, rows[0]);
+    }
+
+    // POST /api/users (Create cashier or admin)
+    if (pathname === '/api/users' && method === 'POST') {
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const role = body.role === 'admin' ? 'admin' : 'cajero';
+      const pin = String(body.pin || '').trim();
+
+      if (!name || !pin) {
+        return sendJson(res, 400, { error: 'Nombre y PIN son obligatorios' });
+      }
+
+      const rows = await query(
+        `INSERT INTO users (name, role, pin)
+         VALUES ($1, $2, $3)
+         RETURNING id, name, role, pin, created_at`,
+        [name, role, pin]
+      );
+      return sendJson(res, 201, rows[0]);
+    }
+
+    // PUT & DELETE /api/users/:id
+    const userMatch = pathname.match(/^\/api\/users\/(\d+)$/);
+    if (userMatch && method === 'PUT') {
+      const id = Number(userMatch[1]);
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const role = body.role === 'admin' ? 'admin' : 'cajero';
+      const pin = String(body.pin || '').trim();
+
+      const rows = await query(
+        `UPDATE users
+         SET name = $1, role = $2, pin = $3
+         WHERE id = $4
+         RETURNING id, name, role, pin, created_at`,
+        [name, role, pin, id]
+      );
+      return sendJson(res, 200, rows[0]);
+    }
+
+    if (userMatch && method === 'DELETE') {
+      const id = Number(userMatch[1]);
+      await query('UPDATE users SET active = FALSE WHERE id = $1', [id]);
+      return sendJson(res, 200, { ok: true });
     }
 
     // GET /api/products
@@ -92,7 +164,7 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 201, rows[0]);
     }
 
-    // PUT /api/products/:id
+    // PUT & DELETE /api/products/:id
     const prodMatch = pathname.match(/^\/api\/products\/(\d+)$/);
     if (prodMatch && method === 'PUT') {
       const id = Number(prodMatch[1]);
@@ -113,21 +185,32 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, rows[0]);
     }
 
-    // DELETE /api/products/:id
     if (prodMatch && method === 'DELETE') {
       const id = Number(prodMatch[1]);
       await query('UPDATE products SET active = FALSE WHERE id = $1', [id]);
       return sendJson(res, 200, { ok: true });
     }
 
-    // GET /api/sales?date=YYYY-MM-DD
+    // GET /api/sales?date=YYYY-MM-DD&cashier_id=123
     if (pathname === '/api/sales' && method === 'GET') {
       const dateParam = urlObj.searchParams.get('date');
+      const cashierIdParam = urlObj.searchParams.get('cashier_id');
+
       let salesRows;
-      if (dateParam) {
+      if (dateParam && cashierIdParam && cashierIdParam !== 'all') {
         salesRows = await query(
           `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                  change_given::float AS change_given, note, created_at
+                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+           FROM sales
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+             AND cashier_id = $2
+           ORDER BY created_at DESC`,
+          [dateParam, Number(cashierIdParam)]
+        );
+      } else if (dateParam) {
+        salesRows = await query(
+          `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
+                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
            ORDER BY created_at DESC`,
@@ -136,7 +219,7 @@ async function handleApi(req, res, urlObj) {
       } else {
         salesRows = await query(
           `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                  change_given::float AS change_given, note, created_at
+                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
            FROM sales
            ORDER BY created_at DESC
            LIMIT 100`
@@ -183,13 +266,15 @@ async function handleApi(req, res, urlObj) {
       const amountReceived = paymentMethod === 'efectivo' ? Number(body.amount_received ?? total) : total;
       const changeGiven = paymentMethod === 'efectivo' ? Math.max(0, amountReceived - total) : 0;
       const note = String(body.note || '').trim();
+      const cashierId = body.cashier_id ? Number(body.cashier_id) : null;
+      const cashierName = String(body.cashier_name || 'General').trim() || 'General';
 
       const saleRows = await query(
-        `INSERT INTO sales (total, payment_method, amount_received, change_given, note)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO sales (total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                   change_given::float AS change_given, note, created_at`,
-        [total, paymentMethod, amountReceived, changeGiven, note]
+                   change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
+        [total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
       );
       const sale = saleRows[0];
 

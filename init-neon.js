@@ -1,12 +1,12 @@
 import { initDatabase, query } from './db.js';
 
 async function main() {
-  console.log('Inicializando esquema y datos base en Neon PostgreSQL...');
+  console.log('Actualizando esquema (Usuarios/Cajeros + Ventas) en Neon PostgreSQL...');
   await initDatabase();
-  const prods = await query('SELECT id, name, category, price, stock, is_service FROM products WHERE active = TRUE ORDER BY id');
-  console.log(`Conectado a Neon correctamente. Productos/Servicios activos: ${prods.length}`);
-  for (const p of prods) {
-    console.log(` - [${p.id}] ${p.name} ($${p.price}) | ${p.is_service ? 'Servicio' : 'Stock: ' + p.stock}`);
+  const users = await query('SELECT id, name, role, pin FROM users WHERE active = TRUE ORDER BY id');
+  console.log(`Usuarios activos en Neon: ${users.length}`);
+  for (const u of users) {
+    console.log(` - [${u.id}] ${u.name} | Rol: ${u.role} | PIN: ${u.pin}`);
   }
 }
 

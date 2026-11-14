@@ -29,6 +29,156 @@ body {
   overflow-x: hidden;
 }
 
+/* Login Screen */
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: radial-gradient(circle at top, #1e293b 0%, #0f172a 70%);
+}
+
+.login-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  width: 100%;
+  max-width: 540px;
+  padding: 2rem;
+  box-shadow: var(--shadow);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.login-users-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.85rem;
+}
+
+.login-user-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+  text-align: center;
+}
+
+.login-user-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--primary);
+}
+
+.user-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+}
+
+.role-badge {
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 0.18rem 0.5rem;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.role-badge.admin {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fcd34d;
+}
+
+.role-badge.cajero {
+  background: rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+}
+
+.login-pin-box {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.selected-user-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg);
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  font-weight: 700;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.input-pin {
+  text-align: center;
+  font-size: 1.8rem;
+  letter-spacing: 0.35em;
+  font-weight: 800;
+  padding: 0.75rem;
+}
+
+.pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.65rem;
+}
+
+.key-btn {
+  padding: 0.95rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1.25rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.key-btn:hover {
+  background: var(--bg-elevated);
+}
+
+.key-btn.key-clear {
+  font-size: 0.95rem;
+  color: #fca5a5;
+}
+
+.key-btn.key-enter {
+  font-size: 0.95rem;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -96,6 +246,7 @@ body {
 .main-nav {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .nav-btn {
@@ -105,9 +256,9 @@ body {
   background: transparent;
   color: var(--text-muted);
   border: 1px solid transparent;
-  padding: 0.55rem 1rem;
+  padding: 0.55rem 0.95rem;
   border-radius: 10px;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -122,6 +273,23 @@ body {
   background: var(--primary);
   color: #fff;
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+}
+
+.user-session-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.active-user-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
 }
 
 /* Main Content */
@@ -411,7 +579,7 @@ body {
   justify-content: space-between;
   font-size: 0.88rem;
   color: var(--text-muted);
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.35rem;
 }
 
 .cart-total-row {
@@ -598,6 +766,7 @@ body {
   align-items: center;
   gap: 0.65rem;
   margin-bottom: 0.35rem;
+  flex-wrap: wrap;
 }
 
 .sale-badge {
@@ -611,6 +780,15 @@ body {
 .sale-badge.efectivo { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
 .sale-badge.tarjeta { background: rgba(59, 130, 246, 0.15); color: #93c5fd; }
 .sale-badge.transferencia { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
+
+.cashier-tag {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.15);
+  color: #e2e8f0;
+  font-weight: 600;
+}
 
 .sale-items-summary {
   font-size: 0.9rem;

@@ -34,7 +34,6 @@ function getNeonHttpEndpoint(connectionString) {
 }
 
 const NEON_HTTP_URL = getNeonHttpEndpoint(DATABASE_URL);
-// Clean connection string for Neon HTTP header
 const CLEAN_CONN_STR = (() => {
   const u = new URL(DATABASE_URL);
   u.searchParams.delete('channel_binding');
@@ -64,6 +63,19 @@ export async function query(sqlText, params = []) {
 }
 
 export async function initDatabase() {
+  // Tabla de usuarios (Admin y Cajeros)
+  await query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'cajero',
+      pin TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // Tabla de productos / servicios
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -77,6 +89,7 @@ export async function initDatabase() {
     );
   `);
 
+  // Tabla de ventas (con cajero asignado)
   await query(`
     CREATE TABLE IF NOT EXISTS sales (
       id SERIAL PRIMARY KEY,
@@ -85,10 +98,17 @@ export async function initDatabase() {
       amount_received NUMERIC(10, 2) NOT NULL DEFAULT 0,
       change_given NUMERIC(10, 2) NOT NULL DEFAULT 0,
       note TEXT DEFAULT '',
+      cashier_id INTEGER,
+      cashier_name TEXT DEFAULT 'General',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
+  // Asegurar columnas de cajero si la tabla sales ya existía antes
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER;`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_name TEXT DEFAULT 'General';`);
+
+  // Tabla de conceptos por venta
   await query(`
     CREATE TABLE IF NOT EXISTS sale_items (
       id SERIAL PRIMARY KEY,
@@ -101,16 +121,29 @@ export async function initDatabase() {
     );
   `);
 
-  // Insert sample products/services if table is empty
-  const existing = await query('SELECT COUNT(*)::int AS total FROM products WHERE active = TRUE');
-  if (existing[0] && Number(existing[0].total) === 0) {
+  // Usuarios iniciales (Admin + 2 Cajeros de ejemplo)
+  const existingUsers = await query('SELECT COUNT(*)::int AS total FROM users WHERE active = TRUE');
+  if (existingUsers[0] && Number(existingUsers[0].total) === 0) {
+    const defaultUsers = [
+      ['Administrador', 'admin', '1234'],
+      ['Cajero 1', 'cajero', '1111'],
+      ['Cajero 2', 'cajero', '2222'],
+    ];
+    for (const [name, role, pin] of defaultUsers) {
+      await query('INSERT INTO users (name, role, pin) VALUES ($1, $2, $3)', [name, role, pin]);
+    }
+  }
+
+  // Productos iniciales de ejemplo
+  const existingProds = await query('SELECT COUNT(*)::int AS total FROM products WHERE active = TRUE');
+  if (existingProds[0] && Number(existingProds[0].total) === 0) {
     const samples = [
-      ['Servicio General / Consulta', 'Servicios', 150.00, null, true],
-      ['Mano de Obra / Instalación', 'Servicios', 300.00, null, true],
-      ['Mantenimiento Preventivo', 'Servicios', 450.00, null, true],
-      ['Artículo General A', 'Productos', 50.00, 25, false],
-      ['Artículo General B', 'Productos', 120.00, 15, false],
-      ['Accesorio / Refacción', 'Productos', 85.00, 30, false],
+      ['Servicio General / Consulta', 'Servicios', 150.0, null, true],
+      ['Mano de Obra / Instalación', 'Servicios', 300.0, null, true],
+      ['Mantenimiento Preventivo', 'Servicios', 450.0, null, true],
+      ['Artículo General A', 'Productos', 50.0, 25, false],
+      ['Artículo General B', 'Productos', 120.0, 15, false],
+      ['Accesorio / Refacción', 'Productos', 85.0, 30, false],
     ];
     for (const [name, category, price, stock, is_service] of samples) {
       await query(

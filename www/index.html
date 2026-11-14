@@ -10,7 +10,58 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-logo">PV</div>
+        <div>
+          <h2>Punto de Venta Carlos</h2>
+          <p class="subtitle">Selecciona tu usuario e ingresa tu PIN de acceso</p>
+        </div>
+      </div>
+
+      <div id="login-users-grid" class="login-users-grid">
+        <!-- Se llena dinámicamente con los cajeros y admin desde Neon -->
+      </div>
+
+      <form id="form-login-pin" class="login-pin-box hidden">
+        <div class="selected-user-banner">
+          <span id="login-selected-name">Usuario</span>
+          <button type="button" id="btn-change-login-user" class="btn-link">Cambiar usuario</button>
+        </div>
+
+        <input
+          type="password"
+          id="login-pin-input"
+          class="input input-pin"
+          placeholder="••••"
+          maxlength="8"
+          inputmode="numeric"
+          autocomplete="off"
+          required
+        />
+
+        <div class="pin-keypad">
+          <button type="button" class="key-btn" data-key="1">1</button>
+          <button type="button" class="key-btn" data-key="2">2</button>
+          <button type="button" class="key-btn" data-key="3">3</button>
+          <button type="button" class="key-btn" data-key="4">4</button>
+          <button type="button" class="key-btn" data-key="5">5</button>
+          <button type="button" class="key-btn" data-key="6">6</button>
+          <button type="button" class="key-btn" data-key="7">7</button>
+          <button type="button" class="key-btn" data-key="8">8</button>
+          <button type="button" class="key-btn" data-key="9">9</button>
+          <button type="button" class="key-btn key-clear" data-key="clear">Borrar</button>
+          <button type="button" class="key-btn" data-key="0">0</button>
+          <button type="submit" class="key-btn key-enter">Entrar →</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- APLICACIÓN PRINCIPAL -->
+  <div id="app-shell" class="app-shell hidden">
     <!-- Top Header -->
     <header class="topbar">
       <div class="brand">
@@ -25,24 +76,39 @@
       </div>
 
       <nav class="main-nav">
-        <button class="nav-btn active" data-tab="pos">
+        <button class="nav-btn active" data-tab="pos" id="nav-tab-pos">
           <span class="nav-icon">🛒</span>
           <span>Caja / Cobrar</span>
         </button>
-        <button class="nav-btn" data-tab="catalog">
-          <span class="nav-icon">📦</span>
-          <span>Catálogo</span>
-        </button>
-        <button class="nav-btn" data-tab="history">
+        <button class="nav-btn" data-tab="history" id="nav-tab-history">
           <span class="nav-icon">📊</span>
-          <span>Corte / Historial</span>
+          <span id="nav-history-label">Mi Turno</span>
+        </button>
+        <!-- Opciones exclusivas de ADMINISTRADOR -->
+        <button class="nav-btn admin-only hidden" data-tab="catalog" id="nav-tab-catalog">
+          <span class="nav-icon">📦</span>
+          <span>Catálogo (Admin)</span>
+        </button>
+        <button class="nav-btn admin-only hidden" data-tab="cashiers" id="nav-tab-cashiers">
+          <span class="nav-icon">👥</span>
+          <span>Cajeros (Admin)</span>
         </button>
       </nav>
+
+      <div class="user-session-bar">
+        <div class="active-user-pill">
+          <span id="active-user-role-badge" class="role-badge">CAJERO</span>
+          <strong id="active-user-name">Cajero</strong>
+        </div>
+        <button id="btn-logout" class="btn btn-secondary btn-sm" title="Cambiar de cajero o cerrar sesión">
+          🔄 Cambiar Turno / Salir
+        </button>
+      </div>
     </header>
 
     <!-- MAIN CONTENT -->
     <main class="main-content">
-      <!-- TAB 1: CAJA / COBRAR -->
+      <!-- TAB 1: CAJA / COBRAR (Cajeros y Admin) -->
       <section id="tab-pos" class="tab-view active">
         <div class="pos-layout">
           <!-- Left: Products / Services Grid -->
@@ -59,9 +125,7 @@
 
             <div id="category-chips" class="category-chips"></div>
 
-            <div id="pos-products-grid" class="products-grid">
-              <!-- Rendered dynamically -->
-            </div>
+            <div id="pos-products-grid" class="products-grid"></div>
           </div>
 
           <!-- Right: Current Sale Cart -->
@@ -71,11 +135,13 @@
               <button id="btn-clear-cart" class="btn-text-danger" title="Vaciar carrito">Vaciar</button>
             </div>
 
-            <div id="cart-items-list" class="cart-items-list">
-              <!-- Rendered dynamically -->
-            </div>
+            <div id="cart-items-list" class="cart-items-list"></div>
 
             <div class="cart-footer">
+              <div class="cart-summary-row">
+                <span>Atiende:</span>
+                <strong id="cart-cashier-name">—</strong>
+              </div>
               <div class="cart-summary-row">
                 <span>Artículos / Servicios</span>
                 <strong id="cart-count">0</strong>
@@ -92,12 +158,67 @@
         </div>
       </section>
 
-      <!-- TAB 2: CATÁLOGO E INVENTARIO -->
+      <!-- TAB 2: CORTE DE TURNO (Cajero) / CORTE GENERAL E HISTORIAL (Admin) -->
+      <section id="tab-history" class="tab-view">
+        <div class="section-header">
+          <div>
+            <h2 id="history-section-title">Corte de Caja e Historial</h2>
+            <p id="history-section-subtitle" class="subtitle">Resumen de ingresos y detalle de ventas</p>
+          </div>
+          <div class="history-controls">
+            <select id="history-cashier-filter" class="input admin-only hidden">
+              <option value="all">👥 Todos los Cajeros</option>
+            </select>
+            <input type="date" id="history-date" class="input" />
+            <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
+            <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Corte</button>
+          </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card kpi-total">
+            <span class="kpi-label">Total Vendido</span>
+            <strong id="kpi-total-sales" class="kpi-value">$0.00</strong>
+            <span id="kpi-sales-count" class="kpi-sub">0 ventas registradas</span>
+          </div>
+          <div class="kpi-card kpi-cash">
+            <span class="kpi-label">💵 Efectivo en Caja</span>
+            <strong id="kpi-cash-sales" class="kpi-value">$0.00</strong>
+            <span class="kpi-sub">Dinero físico a entregar</span>
+          </div>
+          <div class="kpi-card kpi-card">
+            <span class="kpi-label">💳 Tarjeta / Transferencia</span>
+            <strong id="kpi-digital-sales" class="kpi-value">$0.00</strong>
+            <span class="kpi-sub">Cobros electrónicos</span>
+          </div>
+        </div>
+
+        <!-- Desglose por Cajero (Solo visible para Admin) -->
+        <div id="admin-cashier-breakdown-box" class="table-container admin-only hidden" style="margin-bottom: 1.5rem;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Cajero</th>
+                <th>Ventas Realizadas</th>
+                <th>💵 Efectivo</th>
+                <th>💳 Tarjeta / Transf.</th>
+                <th>Total Cobrado</th>
+              </tr>
+            </thead>
+            <tbody id="cashier-breakdown-tbody"></tbody>
+          </table>
+        </div>
+
+        <div id="sales-history-list" class="sales-history-list"></div>
+      </section>
+
+      <!-- TAB 3 (SOLO ADMIN): CATÁLOGO E INVENTARIO -->
       <section id="tab-catalog" class="tab-view">
         <div class="section-header">
           <div>
-            <h2>Catálogo de Productos y Servicios</h2>
-            <p class="subtitle">Sincronizado en tiempo real con Neon PostgreSQL</p>
+            <h2>Panel Admin: Catálogo de Productos y Servicios</h2>
+            <p class="subtitle">Solo el Administrador puede crear, modificar precios, ajustar stock o eliminar conceptos</p>
           </div>
           <button id="btn-new-product" class="btn btn-primary">
             + Nuevo Producto / Servicio
@@ -120,48 +241,35 @@
                 <th>Acciones</th>
               </tr>
             </thead>
-            <tbody id="catalog-table-body">
-              <!-- Rendered dynamically -->
-            </tbody>
+            <tbody id="catalog-table-body"></tbody>
           </table>
         </div>
       </section>
 
-      <!-- TAB 3: HISTORIAL Y CORTE DE CAJA -->
-      <section id="tab-history" class="tab-view">
+      <!-- TAB 4 (SOLO ADMIN): GESTIÓN DE CAJEROS Y ADMINISTRADORES -->
+      <section id="tab-cashiers" class="tab-view">
         <div class="section-header">
           <div>
-            <h2>Corte de Caja e Historial del Día</h2>
-            <p class="subtitle">Resumen de ingresos por método de pago y detalle de ventas</p>
+            <h2>Panel Admin: Cajeros y Permisos</h2>
+            <p class="subtitle">Administra las cuentas de cajeros y sus PINs de acceso</p>
           </div>
-          <div class="history-controls">
-            <input type="date" id="history-date" class="input" />
-            <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
-            <button id="btn-print-corte" class="btn btn-accent">🖨️ Ver Corte de Caja</button>
-          </div>
+          <button id="btn-new-cashier" class="btn btn-primary">
+            + Nuevo Cajero / Usuario
+          </button>
         </div>
 
-        <!-- Summary Cards -->
-        <div class="kpi-grid">
-          <div class="kpi-card kpi-total">
-            <span class="kpi-label">Total Vendido del Día</span>
-            <strong id="kpi-total-sales" class="kpi-value">$0.00</strong>
-            <span id="kpi-sales-count" class="kpi-sub">0 ventas registradas</span>
-          </div>
-          <div class="kpi-card kpi-cash">
-            <span class="kpi-label">💵 Efectivo en Caja</span>
-            <strong id="kpi-cash-sales" class="kpi-value">$0.00</strong>
-            <span class="kpi-sub">Dinero físico recibido neto</span>
-          </div>
-          <div class="kpi-card kpi-card">
-            <span class="kpi-label">💳 Tarjeta / Transferencia</span>
-            <strong id="kpi-digital-sales" class="kpi-value">$0.00</strong>
-            <span class="kpi-sub">Cobros electrónicos</span>
-          </div>
-        </div>
-
-        <div id="sales-history-list" class="sales-history-list">
-          <!-- Rendered dynamically -->
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>Rol / Permisos</th>
+                <th>PIN de Acceso</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="cashiers-table-body"></tbody>
+          </table>
         </div>
       </section>
     </main>
@@ -219,7 +327,7 @@
 
         <div class="form-group">
           <label class="field-label" for="checkout-note">Nota / Cliente (opcional)</label>
-          <input type="text" id="checkout-note" class="input" placeholder="Ej. Mesa 2, Cliente Juan, Servicio exprés..." />
+          <input type="text" id="checkout-note" class="input" placeholder="Ej. Cliente Juan, Servicio exprés..." />
         </div>
       </div>
       <div class="modal-footer">
@@ -261,7 +369,7 @@
     </div>
   </div>
 
-  <!-- MODAL: CREAR / EDITAR PRODUCTO O SERVICIO -->
+  <!-- MODAL (ADMIN): CREAR / EDITAR PRODUCTO O SERVICIO -->
   <div id="modal-product" class="modal-backdrop hidden">
     <div class="modal-card">
       <div class="modal-header">
@@ -272,12 +380,12 @@
         <input type="hidden" id="prod-id" />
         <div class="form-group">
           <label class="field-label" for="prod-name">Nombre del producto o servicio *</label>
-          <input type="text" id="prod-name" class="input" placeholder="Ej. Corte de cabello, Consulta, Refresco..." required />
+          <input type="text" id="prod-name" class="input" placeholder="Ej. Consulta, Instalación, Producto..." required />
         </div>
         <div class="form-row">
           <div class="form-group">
             <label class="field-label" for="prod-category">Categoría</label>
-            <input type="text" id="prod-category" class="input" placeholder="Ej. Servicios, General, Bebidas..." value="General" />
+            <input type="text" id="prod-category" class="input" placeholder="Ej. Servicios, General..." value="General" />
           </div>
           <div class="form-group">
             <label class="field-label" for="prod-price">Precio de venta ($) *</label>
@@ -297,6 +405,40 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-close="modal-product">Cancelar</button>
           <button type="submit" class="btn btn-primary">Guardar en Neon</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL (ADMIN): CREAR / EDITAR CAJERO O ADMIN -->
+  <div id="modal-cashier" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-cashier-title">Nuevo Cajero / Usuario</h3>
+        <button class="modal-close" data-close="modal-cashier">✕</button>
+      </div>
+      <form id="form-cashier" class="modal-body">
+        <input type="hidden" id="cashier-id" />
+        <div class="form-group">
+          <label class="field-label" for="cashier-name">Nombre del Cajero o Administrador *</label>
+          <input type="text" id="cashier-name" class="input" placeholder="Ej. Carlos (Admin), Ana (Turno Mañana)..." required />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="field-label" for="cashier-role">Rol en el sistema</label>
+            <select id="cashier-role" class="input">
+              <option value="cajero">🛒 Cajero (Solo Cobrar y Ver su Turno)</option>
+              <option value="admin">🛡️ Administrador (Acceso Total)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="cashier-pin">PIN de Acceso *</label>
+            <input type="text" id="cashier-pin" class="input" placeholder="Ej. 1111" maxlength="8" required />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close="modal-cashier">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Guardar Usuario</button>
         </div>
       </form>
     </div>

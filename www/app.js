@@ -26,6 +26,16 @@ async function neonQuery(sqlText, params = []) {
 
 async function ensureNeonSchemaDirect() {
   await neonQuery(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'cajero',
+      pin TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await neonQuery(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -45,9 +55,13 @@ async function ensureNeonSchemaDirect() {
       amount_received NUMERIC(10, 2) NOT NULL DEFAULT 0,
       change_given NUMERIC(10, 2) NOT NULL DEFAULT 0,
       note TEXT DEFAULT '',
+      cashier_id INTEGER,
+      cashier_name TEXT DEFAULT 'General',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER;`);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_name TEXT DEFAULT 'General';`);
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS sale_items (
       id SERIAL PRIMARY KEY,
@@ -60,26 +74,20 @@ async function ensureNeonSchemaDirect() {
     );
   `);
 
-  const existing = await neonQuery('SELECT COUNT(*)::int AS total FROM products WHERE active = TRUE');
-  if (existing[0] && Number(existing[0].total) === 0) {
-    const samples = [
-      ['Servicio General / Consulta', 'Servicios', 150.0, null, true],
-      ['Mano de Obra / Instalación', 'Servicios', 300.0, null, true],
-      ['Mantenimiento Preventivo', 'Servicios', 450.0, null, true],
-      ['Artículo General A', 'Productos', 50.0, 25, false],
-      ['Artículo General B', 'Productos', 120.0, 15, false],
-      ['Accesorio / Refacción', 'Productos', 85.0, 30, false],
+  const existingUsers = await neonQuery('SELECT COUNT(*)::int AS total FROM users WHERE active = TRUE');
+  if (existingUsers[0] && Number(existingUsers[0].total) === 0) {
+    const defaultUsers = [
+      ['Administrador', 'admin', '1234'],
+      ['Cajero 1', 'cajero', '1111'],
+      ['Cajero 2', 'cajero', '2222'],
     ];
-    for (const [name, category, price, stock, is_service] of samples) {
-      await neonQuery(
-        'INSERT INTO products (name, category, price, stock, is_service) VALUES ($1, $2, $3, $4, $5)',
-        [name, category, price, stock, is_service]
-      );
+    for (const [name, role, pin] of defaultUsers) {
+      await neonQuery('INSERT INTO users (name, role, pin) VALUES ($1, $2, $3)', [name, role, pin]);
     }
   }
 }
 
-// Capa de datos unificada (usa API del servidor si está disponible, o Neon HTTP directo en APK/Web)
+// Capa de datos unificada (Servidor Web o Directo a Neon desde APK)
 const DataService = {
   useDirectNeon: false,
 
@@ -101,6 +109,73 @@ const DataService = {
     this.useDirectNeon = true;
     await ensureNeonSchemaDirect();
     return { mode: 'Neon Cloud (Directo)' };
+  },
+
+  async getUsers() {
+    if (!this.useDirectNeon) {
+      const res = await fetch('/api/users');
+      if (res.ok) return res.json();
+    }
+    return await neonQuery(`
+      SELECT id, name, role, pin, created_at
+      FROM users
+      WHERE active = TRUE
+      ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name ASC
+    `);
+  },
+
+  async verifyPin(userId, pin) {
+    if (!this.useDirectNeon) {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, pin }),
+      });
+      if (res.ok) return res.json();
+      if (res.status === 401) throw new Error('PIN incorrecto');
+    }
+    const rows = await neonQuery(
+      'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
+      [Number(userId), String(pin).trim()]
+    );
+    if (rows.length === 0) throw new Error('PIN incorrecto');
+    return rows[0];
+  },
+
+  async saveUser(userObj) {
+    const role = userObj.role === 'admin' ? 'admin' : 'cajero';
+    if (!this.useDirectNeon) {
+      const url = userObj.id ? `/api/users/${userObj.id}` : '/api/users';
+      const method = userObj.id ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...userObj, role }),
+      });
+      if (res.ok) return res.json();
+    }
+    if (userObj.id) {
+      const rows = await neonQuery(
+        'UPDATE users SET name = $1, role = $2, pin = $3 WHERE id = $4 RETURNING id, name, role, pin',
+        [userObj.name, role, userObj.pin, Number(userObj.id)]
+      );
+      return rows[0];
+    } else {
+      const rows = await neonQuery(
+        'INSERT INTO users (name, role, pin) VALUES ($1, $2, $3) RETURNING id, name, role, pin',
+        [userObj.name, role, userObj.pin]
+      );
+      return rows[0];
+    }
+  },
+
+  async deleteUser(id) {
+    if (!this.useDirectNeon) {
+      const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+      if (res.ok) return true;
+    }
+    await neonQuery('UPDATE users SET active = FALSE WHERE id = $1', [Number(id)]);
+    return true;
   },
 
   async getProducts() {
@@ -174,13 +249,15 @@ const DataService = {
     const amountReceived = paymentMethod === 'efectivo' ? Number(salePayload.amount_received ?? total) : total;
     const changeGiven = paymentMethod === 'efectivo' ? Math.max(0, amountReceived - total) : 0;
     const note = String(salePayload.note || '').trim();
+    const cashierId = salePayload.cashier_id ? Number(salePayload.cashier_id) : null;
+    const cashierName = String(salePayload.cashier_name || 'General').trim();
 
     const saleRows = await neonQuery(
-      `INSERT INTO sales (total, payment_method, amount_received, change_given, note)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO sales (total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                 change_given::float AS change_given, note, created_at`,
-      [total, paymentMethod, amountReceived, changeGiven, note]
+                 change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
+      [total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
     );
     const sale = saleRows[0];
     const insertedItems = [];
@@ -211,17 +288,29 @@ const DataService = {
     return { ...sale, items: insertedItems };
   },
 
-  async getSales(dateStr) {
+  async getSales(dateStr, cashierId = 'all') {
     if (!this.useDirectNeon) {
-      const url = dateStr ? `/api/sales?date=${encodeURIComponent(dateStr)}` : '/api/sales';
-      const res = await fetch(url);
+      const params = new URLSearchParams();
+      if (dateStr) params.set('date', dateStr);
+      if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
+      const res = await fetch(`/api/sales?${params.toString()}`);
       if (res.ok) return res.json();
     }
     let salesRows;
-    if (dateStr) {
+    if (dateStr && cashierId && cashierId !== 'all') {
       salesRows = await neonQuery(
         `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                change_given::float AS change_given, note, created_at
+                change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+         FROM sales
+         WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+           AND cashier_id = $2
+         ORDER BY created_at DESC`,
+        [dateStr, Number(cashierId)]
+      );
+    } else if (dateStr) {
+      salesRows = await neonQuery(
+        `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
+                change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
          FROM sales
          WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
          ORDER BY created_at DESC`,
@@ -230,7 +319,7 @@ const DataService = {
     } else {
       salesRows = await neonQuery(
         `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                change_given::float AS change_given, note, created_at
+                change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
          FROM sales
          ORDER BY created_at DESC
          LIMIT 100`
@@ -282,6 +371,9 @@ const DataService = {
 
 // Estado de la aplicación
 const state = {
+  users: [],
+  currentUser: null, // { id, name, role: 'admin' | 'cajero' }
+  selectedLoginUser: null,
   products: [],
   cart: [],
   sales: [],
@@ -290,6 +382,7 @@ const state = {
   catalogFilter: '',
   paymentMethod: 'efectivo',
   selectedDate: getTodayLocalISO(),
+  selectedCashierFilter: 'all',
 };
 
 function getTodayLocalISO() {
@@ -311,7 +404,124 @@ function showToast(msg) {
   setTimeout(() => el.remove(), 3200);
 }
 
-// Renderizado de Categorías y Productos en Caja
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ==========================================
+// PANTALLA DE LOGIN Y CONTROL DE PERMISOS
+// ==========================================
+function renderLoginScreen() {
+  const grid = document.getElementById('login-users-grid');
+  const pinForm = document.getElementById('form-login-pin');
+
+  grid.classList.remove('hidden');
+  pinForm.classList.add('hidden');
+
+  grid.innerHTML = state.users
+    .map((u) => {
+      const isAdmin = u.role === 'admin';
+      return `
+        <div class="login-user-card" data-id="${u.id}">
+          <div class="user-avatar">${isAdmin ? '🛡️' : '🧑‍💼'}</div>
+          <strong>${escapeHtml(u.name)}</strong>
+          <span class="role-badge ${u.role}">${isAdmin ? 'Administrador' : 'Cajero'}</span>
+        </div>
+      `;
+    })
+    .join('');
+
+  grid.querySelectorAll('.login-user-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const user = state.users.find((u) => Number(u.id) === Number(card.dataset.id));
+      if (!user) return;
+      state.selectedLoginUser = user;
+      document.getElementById('login-selected-name').textContent = `${
+        user.role === 'admin' ? '🛡️' : '🧑‍💼'
+      } ${user.name}`;
+      document.getElementById('login-pin-input').value = '';
+      grid.classList.add('hidden');
+      pinForm.classList.remove('hidden');
+      setTimeout(() => document.getElementById('login-pin-input').focus(), 80);
+    });
+  });
+}
+
+function applyRolePermissions() {
+  const user = state.currentUser;
+  if (!user) return;
+
+  const isAdmin = user.role === 'admin';
+
+  // Mostrar/ocultar todos los elementos marcados como exclusivos de Admin
+  document.querySelectorAll('.admin-only').forEach((el) => {
+    el.classList.toggle('hidden', !isAdmin);
+  });
+
+  // Etiquetas dinámicas según rol
+  document.getElementById('active-user-name').textContent = user.name;
+  const badge = document.getElementById('active-user-role-badge');
+  badge.textContent = isAdmin ? 'ADMIN' : 'CAJERO';
+  badge.className = `role-badge ${user.role}`;
+
+  document.getElementById('cart-cashier-name').textContent = user.name;
+
+  if (isAdmin) {
+    document.getElementById('nav-history-label').textContent = 'Corte General (Admin)';
+    document.getElementById('history-section-title').textContent = 'Corte General de Caja e Historial';
+    document.getElementById('history-section-subtitle').textContent =
+      'Vista de Administrador: Filtra por cajero, imprime cortes y administra ventas';
+    state.selectedCashierFilter = 'all';
+    renderCashierFilterDropdown();
+  } else {
+    document.getElementById('nav-history-label').textContent = 'Mi Turno';
+    document.getElementById('history-section-title').textContent = `Mi Corte de Turno (${user.name})`;
+    document.getElementById('history-section-subtitle').textContent =
+      'Ventas cobradas únicamente en tu turno actual';
+    state.selectedCashierFilter = String(user.id);
+  }
+
+  // Ir a la pestaña de Caja por defecto al iniciar turno
+  switchTab('pos');
+}
+
+function switchTab(tabName) {
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  if (!isAdmin && (tabName === 'catalog' || tabName === 'cashiers')) {
+    showToast('🔒 Acceso exclusivo para Administrador');
+    return;
+  }
+
+  document.querySelectorAll('.nav-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === tabName);
+  });
+  document.querySelectorAll('.tab-view').forEach((v) => {
+    v.classList.toggle('active', v.id === `tab-${tabName}`);
+  });
+
+  if (tabName === 'history') loadSales();
+  if (tabName === 'cashiers' && isAdmin) renderCashiersTable();
+}
+
+function renderCashierFilterDropdown() {
+  const sel = document.getElementById('history-cashier-filter');
+  sel.innerHTML = `<option value="all">👥 Todos los Cajeros</option>`;
+  state.users.forEach((u) => {
+    const opt = document.createElement('option');
+    opt.value = String(u.id);
+    opt.textContent = `${u.role === 'admin' ? '🛡️' : '🧑‍💼'} ${u.name}`;
+    sel.appendChild(opt);
+  });
+  sel.value = state.selectedCashierFilter;
+}
+
+// ==========================================
+// MÓDULO 1: CAJA / PUNTO DE VENTA
+// ==========================================
 function renderCategories() {
   const cats = new Set(['Todos']);
   state.products.forEach((p) => {
@@ -382,7 +592,6 @@ function renderPosProducts() {
   });
 }
 
-// Carrito de Venta
 function addToCart(prod, customQty = 1) {
   const isService = Boolean(prod.is_service) || prod.stock === null;
   const existing = state.cart.find((item) => item.product_id && Number(item.product_id) === Number(prod.id));
@@ -447,14 +656,9 @@ function renderCart() {
   btnCheckoutAmt.textContent = formatMoney(totalAmount);
   btnCheckout.disabled = state.cart.length === 0;
 
-  // Mobile sticky bar
   document.getElementById('mobile-cart-count').textContent = `${totalItems} concepto(s)`;
   document.getElementById('mobile-cart-total').textContent = formatMoney(totalAmount);
-  if (state.cart.length > 0) {
-    mobileBar.classList.remove('hidden');
-  } else {
-    mobileBar.classList.add('hidden');
-  }
+  mobileBar.classList.toggle('hidden', state.cart.length === 0);
 
   if (state.cart.length === 0) {
     listEl.innerHTML = `<div class="cart-empty">Selecciona productos o servicios del catálogo para comenzar a cobrar.</div>`;
@@ -487,7 +691,9 @@ function renderCart() {
   });
 }
 
-// Renderizado de Catálogo e Inventario
+// ==========================================
+// MÓDULO 2 (SOLO ADMIN): CATÁLOGO E INVENTARIO
+// ==========================================
 function renderCatalogTable() {
   const tbody = document.getElementById('catalog-table-body');
   const q = state.catalogFilter.toLowerCase().trim();
@@ -567,9 +773,79 @@ function renderCatalogTable() {
   });
 }
 
-// Renderizado de Historial y Corte de Caja
+// ==========================================
+// MÓDULO 3 (SOLO ADMIN): GESTIÓN DE CAJEROS
+// ==========================================
+function renderCashiersTable() {
+  const tbody = document.getElementById('cashiers-table-body');
+  tbody.innerHTML = state.users
+    .map((u) => {
+      const isAdmin = u.role === 'admin';
+      return `
+        <tr>
+          <td><strong>${escapeHtml(u.name)}</strong></td>
+          <td>
+            <span class="role-badge ${u.role}">
+              ${isAdmin ? '🛡️ Administrador (Acceso Total)' : '🛒 Cajero (Solo Caja y Turno)'}
+            </span>
+          </td>
+          <td><code>${escapeHtml(u.pin)}</code></td>
+          <td>
+            <div style="display:flex; gap:0.4rem;">
+              <button class="btn btn-secondary btn-sm btn-edit-user" data-id="${u.id}">Editar / PIN</button>
+              <button class="btn btn-danger btn-sm btn-del-user" data-id="${u.id}">Dar de baja</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  tbody.querySelectorAll('.btn-edit-user').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const user = state.users.find((u) => Number(u.id) === Number(btn.dataset.id));
+      if (user) openCashierModal(user);
+    });
+  });
+
+  tbody.querySelectorAll('.btn-del-user').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.dataset.id);
+      const user = state.users.find((u) => Number(u.id) === id);
+      if (!user) return;
+      const adminsCount = state.users.filter((u) => u.role === 'admin').length;
+      if (user.role === 'admin' && adminsCount <= 1) {
+        alert('No puedes eliminar al único Administrador activo.');
+        return;
+      }
+      if (confirm(`¿Dar de baja a "${user.name}"?`)) {
+        await DataService.deleteUser(id);
+        await loadUsers();
+        renderCashiersTable();
+        showToast(`Usuario "${user.name}" dado de baja`);
+      }
+    });
+  });
+}
+
+function openCashierModal(user = null) {
+  document.getElementById('modal-cashier-title').textContent = user
+    ? 'Editar Cajero / Usuario'
+    : 'Nuevo Cajero / Usuario';
+  document.getElementById('cashier-id').value = user ? user.id : '';
+  document.getElementById('cashier-name').value = user ? user.name : '';
+  document.getElementById('cashier-role').value = user ? user.role : 'cajero';
+  document.getElementById('cashier-pin').value = user ? user.pin : '';
+  document.getElementById('modal-cashier').classList.remove('hidden');
+}
+
+// ==========================================
+// MÓDULO 4: HISTORIAL Y CORTE DE CAJA
+// ==========================================
 function renderSalesHistory() {
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const listEl = document.getElementById('sales-history-list');
+
   const totalSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
   const cashSales = state.sales
     .filter((s) => s.payment_method === 'efectivo')
@@ -583,8 +859,45 @@ function renderSalesHistory() {
   document.getElementById('kpi-cash-sales').textContent = formatMoney(cashSales);
   document.getElementById('kpi-digital-sales').textContent = formatMoney(digitalSales);
 
+  // Tabla de desglose por cajero (solo para Admin)
+  if (isAdmin) {
+    const byCashier = {};
+    for (const s of state.sales) {
+      const cName = s.cashier_name || 'General';
+      if (!byCashier[cName]) {
+        byCashier[cName] = { count: 0, cash: 0, digital: 0, total: 0 };
+      }
+      byCashier[cName].count += 1;
+      byCashier[cName].total += Number(s.total);
+      if (s.payment_method === 'efectivo') {
+        byCashier[cName].cash += Number(s.total);
+      } else {
+        byCashier[cName].digital += Number(s.total);
+      }
+    }
+    const breakdownTbody = document.getElementById('cashier-breakdown-tbody');
+    const names = Object.keys(byCashier);
+    if (names.length === 0) {
+      breakdownTbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">Sin ventas en esta fecha</td></tr>`;
+    } else {
+      breakdownTbody.innerHTML = names
+        .map(
+          (name) => `
+          <tr>
+            <td><strong>🧑‍💼 ${escapeHtml(name)}</strong></td>
+            <td>${byCashier[name].count} venta(s)</td>
+            <td><strong>${formatMoney(byCashier[name].cash)}</strong></td>
+            <td>${formatMoney(byCashier[name].digital)}</td>
+            <td><strong style="color:var(--success)">${formatMoney(byCashier[name].total)}</strong></td>
+          </tr>
+        `
+        )
+        .join('');
+    }
+  }
+
   if (state.sales.length === 0) {
-    listEl.innerHTML = `<div class="cart-empty">No hay ventas registradas en esta fecha (${state.selectedDate}).</div>`;
+    listEl.innerHTML = `<div class="cart-empty">No hay ventas registradas para mostrar (${state.selectedDate}).</div>`;
     return;
   }
 
@@ -594,9 +907,7 @@ function renderSalesHistory() {
         hour: '2-digit',
         minute: '2-digit',
       });
-      const itemsSummary = (s.items || [])
-        .map((it) => `${it.quantity}x ${it.product_name}`)
-        .join(', ');
+      const itemsSummary = (s.items || []).map((it) => `${it.quantity}x ${it.product_name}`).join(', ');
 
       return `
         <div class="sale-card">
@@ -604,6 +915,7 @@ function renderSalesHistory() {
             <div class="sale-card-header">
               <strong>Folio #${s.id}</strong>
               <span class="sale-badge ${s.payment_method}">${s.payment_method}</span>
+              <span class="cashier-tag">🧑‍💼 ${escapeHtml(s.cashier_name || 'General')}</span>
               <span style="color:var(--text-muted); font-size:0.85rem;">🕒 ${timeStr}</span>
             </div>
             <div class="sale-items-summary">${escapeHtml(itemsSummary || 'Venta general')}</div>
@@ -619,7 +931,11 @@ function renderSalesHistory() {
           <div class="sale-card-right">
             <span class="sale-total-amount">${formatMoney(s.total)}</span>
             <button class="btn btn-secondary btn-sm btn-view-ticket" data-id="${s.id}">🧾 Ticket</button>
-            <button class="btn btn-danger btn-sm btn-cancel-sale" data-id="${s.id}">Cancelar</button>
+            ${
+              isAdmin
+                ? `<button class="btn btn-danger btn-sm btn-cancel-sale" data-id="${s.id}">Cancelar</button>`
+                : ''
+            }
           </div>
         </div>
       `;
@@ -633,16 +949,18 @@ function renderSalesHistory() {
     });
   });
 
-  listEl.querySelectorAll('.btn-cancel-sale').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = Number(btn.dataset.id);
-      if (confirm(`¿Cancelar la venta Folio #${id}? Se devolverá el stock al inventario.`)) {
-        await DataService.deleteSale(id);
-        await Promise.all([loadProducts(), loadSales()]);
-        showToast(`Venta #${id} cancelada`);
-      }
+  if (isAdmin) {
+    listEl.querySelectorAll('.btn-cancel-sale').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = Number(btn.dataset.id);
+        if (confirm(`¿Cancelar la venta Folio #${id}? Se devolverá el stock al inventario.`)) {
+          await DataService.deleteSale(id);
+          await Promise.all([loadProducts(), loadSales()]);
+          showToast(`Venta #${id} cancelada`);
+        }
+      });
     });
-  });
+  }
 }
 
 // Modales de Ticket y Corte de Caja
@@ -663,6 +981,7 @@ function showSaleTicketModal(sale) {
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <h3 style="margin:0;">PUNTO DE VENTA CARLOS</h3>
       <div>Folio #${sale.id}</div>
+      <div>Atendió: <strong>${escapeHtml(sale.cashier_name || 'General')}</strong></div>
       <div style="font-size:0.8rem;">${dateStr}</div>
     </div>
     <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
@@ -701,12 +1020,20 @@ function showDailyCorteModal() {
     .filter((s) => s.payment_method === 'transferencia')
     .reduce((sum, s) => sum + Number(s.total), 0);
 
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  const scopeLabel = !isAdmin
+    ? `Cajero: ${state.currentUser.name}`
+    : state.selectedCashierFilter === 'all'
+    ? 'Todos los Cajeros (General)'
+    : `Cajero filtrado`;
+
   document.getElementById('receipt-title').textContent = `Corte de Caja (${state.selectedDate})`;
   document.getElementById('receipt-content').innerHTML = `
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
-      <h3 style="margin:0;">CORTE DE CAJA DEL DÍA</h3>
+      <h3 style="margin:0;">CORTE DE CAJA</h3>
       <div>Fecha: <strong>${state.selectedDate}</strong></div>
-      <div>Operaciones registradas: <strong>${state.sales.length}</strong></div>
+      <div>Alcance: <strong>${escapeHtml(scopeLabel)}</strong></div>
+      <div>Operaciones: <strong>${state.sales.length}</strong></div>
     </div>
     <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
@@ -780,7 +1107,6 @@ function updateChangeCalculation() {
   }
 }
 
-// Modal de Producto / Servicio
 function openProductModal(prod = null) {
   document.getElementById('modal-product-title').textContent = prod
     ? 'Editar Producto / Servicio'
@@ -796,15 +1122,15 @@ function openProductModal(prod = null) {
   document.getElementById('modal-product').classList.remove('hidden');
 }
 
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+// Carga de datos desde Neon
+async function loadUsers() {
+  state.users = await DataService.getUsers();
+  renderLoginScreen();
+  if (state.currentUser && state.currentUser.role === 'admin') {
+    renderCashierFilterDropdown();
+  }
 }
 
-// Carga de datos desde Neon
 async function loadProducts() {
   state.products = await DataService.getProducts();
   renderCategories();
@@ -813,26 +1139,69 @@ async function loadProducts() {
 }
 
 async function loadSales() {
-  state.sales = await DataService.getSales(state.selectedDate);
+  if (!state.currentUser) return;
+  const cashierFilter =
+    state.currentUser.role === 'admin' ? state.selectedCashierFilter : String(state.currentUser.id);
+  state.sales = await DataService.getSales(state.selectedDate, cashierFilter);
   renderSalesHistory();
 }
 
 // Inicialización general y eventos
 async function initApp() {
-  // Fecha inicial en corte de caja
   const dateInput = document.getElementById('history-date');
   dateInput.value = state.selectedDate;
 
+  // Eventos de Login por PIN
+  document.getElementById('btn-change-login-user').addEventListener('click', () => {
+    state.selectedLoginUser = null;
+    renderLoginScreen();
+  });
+
+  document.querySelectorAll('.key-btn[data-key]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key;
+      const input = document.getElementById('login-pin-input');
+      if (key === 'clear') {
+        input.value = '';
+      } else if (input.value.length < 8) {
+        input.value += key;
+      }
+      input.focus();
+    });
+  });
+
+  document.getElementById('form-login-pin').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!state.selectedLoginUser) return;
+    const pin = document.getElementById('login-pin-input').value.trim();
+    try {
+      const verifiedUser = await DataService.verifyPin(state.selectedLoginUser.id, pin);
+      state.currentUser = verifiedUser;
+      document.getElementById('login-screen').classList.add('hidden');
+      document.getElementById('app-shell').classList.remove('hidden');
+      applyRolePermissions();
+      await loadSales();
+      showToast(`👋 Bienvenido, ${verifiedUser.name}`);
+    } catch {
+      showToast('❌ PIN incorrecto, intenta de nuevo');
+      document.getElementById('login-pin-input').value = '';
+      document.getElementById('login-pin-input').focus();
+    }
+  });
+
+  // Cambiar Turno / Cerrar Sesión
+  document.getElementById('btn-logout').addEventListener('click', async () => {
+    state.currentUser = null;
+    state.cart = [];
+    renderCart();
+    document.getElementById('app-shell').classList.add('hidden');
+    document.getElementById('login-screen').classList.remove('hidden');
+    await loadUsers();
+  });
+
   // Navegación de pestañas
   document.querySelectorAll('.nav-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.nav-btn').forEach((b) => b.classList.remove('active'));
-      document.querySelectorAll('.tab-view').forEach((v) => v.classList.remove('active'));
-      btn.classList.add('active');
-      const tab = btn.dataset.tab;
-      document.getElementById(`tab-${tab}`).classList.add('active');
-      if (tab === 'history') loadSales();
-    });
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
 
   // Cerrar modales
@@ -842,13 +1211,12 @@ async function initApp() {
     });
   });
 
-  // Búsqueda en POS
+  // Búsqueda en POS y Catálogo
   document.getElementById('pos-search').addEventListener('input', (e) => {
     state.searchQuery = e.target.value;
     renderPosProducts();
   });
 
-  // Búsqueda en Catálogo
   document.getElementById('catalog-search').addEventListener('input', (e) => {
     state.catalogFilter = e.target.value;
     renderCatalogTable();
@@ -882,7 +1250,7 @@ async function initApp() {
     });
   });
 
-  // Confirmar venta en Neon
+  // Confirmar venta en Neon (guardando el cajero que cobró)
   document.getElementById('btn-confirm-sale').addEventListener('click', async () => {
     const btn = document.getElementById('btn-confirm-sale');
     btn.disabled = true;
@@ -893,11 +1261,13 @@ async function initApp() {
         payment_method: state.paymentMethod,
         amount_received: Number(document.getElementById('checkout-received').value || getCartTotal()),
         note: document.getElementById('checkout-note').value,
+        cashier_id: state.currentUser ? state.currentUser.id : null,
+        cashier_name: state.currentUser ? state.currentUser.name : 'General',
       });
       state.cart = [];
       renderCart();
       document.getElementById('modal-checkout').classList.add('hidden');
-      showToast(`✅ Venta #${sale.id} registrada con éxito`);
+      showToast(`✅ Venta #${sale.id} registrada por ${sale.cashier_name}`);
       showSaleTicketModal(sale);
       await Promise.all([loadProducts(), loadSales()]);
     } catch (err) {
@@ -927,7 +1297,7 @@ async function initApp() {
     showToast(`Agregado: ${qty}x ${name}`);
   });
 
-  // Crear / Editar Producto
+  // Admin: Crear / Editar Producto
   document.getElementById('btn-new-product').addEventListener('click', () => openProductModal(null));
 
   document.getElementById('prod-is-service').addEventListener('change', (e) => {
@@ -950,9 +1320,32 @@ async function initApp() {
     showToast('✅ Catálogo actualizado en Neon');
   });
 
+  // Admin: Crear / Editar Cajero
+  document.getElementById('btn-new-cashier').addEventListener('click', () => openCashierModal(null));
+
+  document.getElementById('form-cashier').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      id: document.getElementById('cashier-id').value || null,
+      name: document.getElementById('cashier-name').value.trim(),
+      role: document.getElementById('cashier-role').value,
+      pin: document.getElementById('cashier-pin').value.trim(),
+    };
+    await DataService.saveUser(payload);
+    document.getElementById('modal-cashier').classList.add('hidden');
+    await loadUsers();
+    renderCashiersTable();
+    showToast('✅ Usuario guardado en Neon');
+  });
+
   // Historial y Corte
   dateInput.addEventListener('change', (e) => {
     state.selectedDate = e.target.value;
+    loadSales();
+  });
+
+  document.getElementById('history-cashier-filter').addEventListener('change', (e) => {
+    state.selectedCashierFilter = e.target.value;
     loadSales();
   });
 
@@ -966,6 +1359,7 @@ async function initApp() {
 
   // Atajos de teclado para uso rápido en PC
   window.addEventListener('keydown', (e) => {
+    if (!state.currentUser) return;
     if (e.key === 'F2') {
       e.preventDefault();
       if (state.cart.length > 0) openCheckoutModal();
@@ -983,7 +1377,7 @@ async function initApp() {
   try {
     renderCart();
     const info = await DataService.init();
-    await Promise.all([loadProducts(), loadSales()]);
+    await Promise.all([loadUsers(), loadProducts()]);
     dotEl.className = 'status-dot connected';
     txtEl.textContent = `Conectado: ${info.mode}`;
   } catch (err) {
