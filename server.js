@@ -55,13 +55,12 @@ async function handleApi(req, res, urlObj) {
   }
 
   try {
-    // Health check
     if (pathname === '/api/health' && method === 'GET') {
       const rows = await query('SELECT NOW() AS server_time');
       return sendJson(res, 200, { ok: true, connected: true, serverTime: rows[0]?.server_time });
     }
 
-    // GET /api/users (List active cashiers & admins)
+    // USERS (Cashiers & Admins)
     if (pathname === '/api/users' && method === 'GET') {
       const rows = await query(`
         SELECT id, name, role, pin, created_at
@@ -72,7 +71,6 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, rows);
     }
 
-    // POST /api/auth (Verify PIN login)
     if (pathname === '/api/auth' && method === 'POST') {
       const body = await parseBody(req);
       const userId = Number(body.user_id || 0);
@@ -88,7 +86,6 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, rows[0]);
     }
 
-    // POST /api/users (Create cashier or admin)
     if (pathname === '/api/users' && method === 'POST') {
       const body = await parseBody(req);
       const name = String(body.name || '').trim();
@@ -108,7 +105,6 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 201, rows[0]);
     }
 
-    // PUT & DELETE /api/users/:id
     const userMatch = pathname.match(/^\/api\/users\/(\d+)$/);
     if (userMatch && method === 'PUT') {
       const id = Number(userMatch[1]);
@@ -133,10 +129,12 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, { ok: true });
     }
 
-    // GET /api/products
+    // PRODUCTS / SERVICES / SPECIAL SERVICES
     if (pathname === '/api/products' && method === 'GET') {
       const rows = await query(`
-        SELECT id, name, category, price::float AS price, stock, is_service, created_at
+        SELECT id, name, category, price::float AS price, stock, is_service,
+               COALESCE(product_type, CASE WHEN is_service THEN 'servicio' ELSE 'producto' END) AS product_type,
+               free_after_sales, COALESCE(sales_counter, 0) AS sales_counter, created_at
         FROM products
         WHERE active = TRUE
         ORDER BY category ASC, name ASC
@@ -144,27 +142,34 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, rows);
     }
 
-    // POST /api/products
     if (pathname === '/api/products' && method === 'POST') {
       const body = await parseBody(req);
       const name = String(body.name || '').trim();
       const category = String(body.category || 'General').trim() || 'General';
       const price = Number(body.price || 0);
-      const isService = Boolean(body.is_service);
+      const productType = ['producto', 'servicio', 'servicio_especial'].includes(body.product_type)
+        ? body.product_type
+        : body.is_service
+        ? 'servicio'
+        : 'producto';
+      const isService = productType !== 'producto';
       const stock = isService || body.stock === null || body.stock === '' ? null : Number(body.stock);
+      const freeAfterSales =
+        productType === 'servicio_especial' ? Math.max(1, Number(body.free_after_sales || 5)) : null;
+      const salesCounter =
+        productType === 'servicio_especial' ? Math.max(0, Number(body.sales_counter || 0)) : 0;
 
       if (!name) return sendJson(res, 400, { error: 'El nombre es obligatorio' });
 
       const rows = await query(
-        `INSERT INTO products (name, category, price, stock, is_service)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, name, category, price::float AS price, stock, is_service, created_at`,
-        [name, category, price, stock, isService]
+        `INSERT INTO products (name, category, price, stock, is_service, product_type, free_after_sales, sales_counter)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, name, category, price::float AS price, stock, is_service, product_type, free_after_sales, sales_counter, created_at`,
+        [name, category, price, stock, isService, productType, freeAfterSales, salesCounter]
       );
       return sendJson(res, 201, rows[0]);
     }
 
-    // PUT & DELETE /api/products/:id
     const prodMatch = pathname.match(/^\/api\/products\/(\d+)$/);
     if (prodMatch && method === 'PUT') {
       const id = Number(prodMatch[1]);
@@ -172,15 +177,25 @@ async function handleApi(req, res, urlObj) {
       const name = String(body.name || '').trim();
       const category = String(body.category || 'General').trim() || 'General';
       const price = Number(body.price || 0);
-      const isService = Boolean(body.is_service);
+      const productType = ['producto', 'servicio', 'servicio_especial'].includes(body.product_type)
+        ? body.product_type
+        : body.is_service
+        ? 'servicio'
+        : 'producto';
+      const isService = productType !== 'producto';
       const stock = isService || body.stock === null || body.stock === '' ? null : Number(body.stock);
+      const freeAfterSales =
+        productType === 'servicio_especial' ? Math.max(1, Number(body.free_after_sales || 5)) : null;
+      const salesCounter =
+        productType === 'servicio_especial' ? Math.max(0, Number(body.sales_counter ?? 0)) : 0;
 
       const rows = await query(
         `UPDATE products
-         SET name = $1, category = $2, price = $3, stock = $4, is_service = $5
-         WHERE id = $6
-         RETURNING id, name, category, price::float AS price, stock, is_service, created_at`,
-        [name, category, price, stock, isService, id]
+         SET name = $1, category = $2, price = $3, stock = $4, is_service = $5,
+             product_type = $6, free_after_sales = $7, sales_counter = $8
+         WHERE id = $9
+         RETURNING id, name, category, price::float AS price, stock, is_service, product_type, free_after_sales, sales_counter, created_at`,
+        [name, category, price, stock, isService, productType, freeAfterSales, salesCounter, id]
       );
       return sendJson(res, 200, rows[0]);
     }
@@ -191,7 +206,67 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, { ok: true });
     }
 
-    // GET /api/sales?date=YYYY-MM-DD&cashier_id=123
+    // PROMOTIONS / COMBOS (Compra A + B = -$ descuento)
+    if (pathname === '/api/promotions' && method === 'GET') {
+      const rows = await query(`
+        SELECT pr.id, pr.name, pr.product_a_id, pr.product_b_id,
+               pr.discount_amount::float AS discount_amount, pr.active,
+               pa.name AS product_a_name, pb.name AS product_b_name
+        FROM promotions pr
+        LEFT JOIN products pa ON pa.id = pr.product_a_id
+        LEFT JOIN products pb ON pb.id = pr.product_b_id
+        WHERE pr.active = TRUE
+        ORDER BY pr.id DESC
+      `);
+      return sendJson(res, 200, rows);
+    }
+
+    if (pathname === '/api/promotions' && method === 'POST') {
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const productAId = Number(body.product_a_id);
+      const productBId = Number(body.product_b_id);
+      const discountAmount = Number(body.discount_amount || 0);
+
+      if (!name || !productAId || !productBId || discountAmount <= 0) {
+        return sendJson(res, 400, { error: 'Datos de promoción incompletos' });
+      }
+
+      const rows = await query(
+        `INSERT INTO promotions (name, product_a_id, product_b_id, discount_amount)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, name, product_a_id, product_b_id, discount_amount::float AS discount_amount, active`,
+        [name, productAId, productBId, discountAmount]
+      );
+      return sendJson(res, 201, rows[0]);
+    }
+
+    const promoMatch = pathname.match(/^\/api\/promotions\/(\d+)$/);
+    if (promoMatch && method === 'PUT') {
+      const id = Number(promoMatch[1]);
+      const body = await parseBody(req);
+      const name = String(body.name || '').trim();
+      const productAId = Number(body.product_a_id);
+      const productBId = Number(body.product_b_id);
+      const discountAmount = Number(body.discount_amount || 0);
+
+      const rows = await query(
+        `UPDATE promotions
+         SET name = $1, product_a_id = $2, product_b_id = $3, discount_amount = $4
+         WHERE id = $5
+         RETURNING id, name, product_a_id, product_b_id, discount_amount::float AS discount_amount, active`,
+        [name, productAId, productBId, discountAmount, id]
+      );
+      return sendJson(res, 200, rows[0]);
+    }
+
+    if (promoMatch && method === 'DELETE') {
+      const id = Number(promoMatch[1]);
+      await query('UPDATE promotions SET active = FALSE WHERE id = $1', [id]);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // SALES
     if (pathname === '/api/sales' && method === 'GET') {
       const dateParam = urlObj.searchParams.get('date');
       const cashierIdParam = urlObj.searchParams.get('cashier_id');
@@ -199,8 +274,10 @@ async function handleApi(req, res, urlObj) {
       let salesRows;
       if (dateParam && cashierIdParam && cashierIdParam !== 'all') {
         salesRows = await query(
-          `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+          `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                  COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                  amount_received::float AS amount_received, change_given::float AS change_given,
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
              AND cashier_id = $2
@@ -209,8 +286,10 @@ async function handleApi(req, res, urlObj) {
         );
       } else if (dateParam) {
         salesRows = await query(
-          `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+          `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                  COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                  amount_received::float AS amount_received, change_given::float AS change_given,
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
            ORDER BY created_at DESC`,
@@ -218,8 +297,10 @@ async function handleApi(req, res, urlObj) {
         );
       } else {
         salesRows = await query(
-          `SELECT id, total::float AS total, payment_method, amount_received::float AS amount_received,
-                  change_given::float AS change_given, note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+          `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                  COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                  amount_received::float AS amount_received, change_given::float AS change_given,
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
            FROM sales
            ORDER BY created_at DESC
            LIMIT 100`
@@ -232,7 +313,8 @@ async function handleApi(req, res, urlObj) {
 
       const saleIds = salesRows.map((s) => s.id);
       const itemsRows = await query(
-        `SELECT id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price, subtotal::float AS subtotal
+        `SELECT id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price,
+                subtotal::float AS subtotal, COALESCE(is_free_reward, FALSE) AS is_free_reward
          FROM sale_items
          WHERE sale_id = ANY($1::int[])
          ORDER BY id ASC`,
@@ -253,7 +335,6 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 200, result);
     }
 
-    // POST /api/sales
     if (pathname === '/api/sales' && method === 'POST') {
       const body = await parseBody(req);
       const items = Array.isArray(body.items) ? body.items : [];
@@ -262,7 +343,10 @@ async function handleApi(req, res, urlObj) {
       }
 
       const paymentMethod = body.payment_method || 'efectivo';
-      const total = items.reduce((acc, it) => acc + Number(it.unit_price) * Number(it.quantity), 0);
+      const subtotal = items.reduce((acc, it) => acc + Number(it.subtotal ?? Number(it.unit_price) * Number(it.quantity)), 0);
+      const discountTotal = Math.max(0, Number(body.discount_total || 0));
+      const promoSummary = String(body.promo_summary || '').trim();
+      const total = Math.max(0, subtotal - discountTotal);
       const amountReceived = paymentMethod === 'efectivo' ? Number(body.amount_received ?? total) : total;
       const changeGiven = paymentMethod === 'efectivo' ? Math.max(0, amountReceived - total) : 0;
       const note = String(body.note || '').trim();
@@ -270,11 +354,12 @@ async function handleApi(req, res, urlObj) {
       const cashierName = String(body.cashier_name || 'General').trim() || 'General';
 
       const saleRows = await query(
-        `INSERT INTO sales (total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, total::float AS total, payment_method, amount_received::float AS amount_received,
+        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
+                   total::float AS total, payment_method, amount_received::float AS amount_received,
                    change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
-        [total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
+        [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
       );
       const sale = saleRows[0];
 
@@ -282,43 +367,60 @@ async function handleApi(req, res, urlObj) {
       for (const it of items) {
         const qty = Number(it.quantity) || 1;
         const unitPrice = Number(it.unit_price) || 0;
-        const subtotal = qty * unitPrice;
+        const itemSubtotal = Number(it.subtotal ?? qty * unitPrice);
         const productId = it.product_id ? Number(it.product_id) : null;
+        const isFreeReward = Boolean(it.is_free_reward);
 
         const itemRow = await query(
-          `INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, subtotal)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price, subtotal::float AS subtotal`,
-          [sale.id, productId, it.product_name, qty, unitPrice, subtotal]
+          `INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, subtotal, is_free_reward)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price, subtotal::float AS subtotal, is_free_reward`,
+          [sale.id, productId, it.product_name, qty, unitPrice, itemSubtotal, isFreeReward]
         );
         insertedItems.push(itemRow[0]);
 
         if (productId) {
-          await query(
-            `UPDATE products
-             SET stock = CASE WHEN is_service = FALSE AND stock IS NOT NULL THEN GREATEST(0, stock - $1) ELSE stock END
-             WHERE id = $2`,
-            [qty, productId]
+          // Descontar stock si es producto físico y avanzar contador si es servicio_especial
+          const prodRows = await query(
+            'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
+            [productId]
           );
+          if (prodRows[0]) {
+            const p = prodRows[0];
+            if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
+              const cycle = Number(p.free_after_sales) + 1;
+              const nextCounter = (Number(p.sales_counter) + qty) % cycle;
+              await query('UPDATE products SET sales_counter = $1 WHERE id = $2', [nextCounter, productId]);
+            } else if (!p.is_service && p.product_type === 'producto' && p.stock !== null) {
+              await query('UPDATE products SET stock = GREATEST(0, stock - $1) WHERE id = $2', [qty, productId]);
+            }
+          }
         }
       }
 
       return sendJson(res, 201, { ...sale, items: insertedItems });
     }
 
-    // DELETE /api/sales/:id (Cancel sale and restore stock)
     const saleMatch = pathname.match(/^\/api\/sales\/(\d+)$/);
     if (saleMatch && method === 'DELETE') {
       const saleId = Number(saleMatch[1]);
       const items = await query('SELECT product_id, quantity FROM sale_items WHERE sale_id = $1', [saleId]);
       for (const it of items) {
         if (it.product_id) {
-          await query(
-            `UPDATE products
-             SET stock = CASE WHEN is_service = FALSE AND stock IS NOT NULL THEN stock + $1 ELSE stock END
-             WHERE id = $2`,
-            [it.quantity, it.product_id]
+          const prodRows = await query(
+            'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
+            [it.product_id]
           );
+          if (prodRows[0]) {
+            const p = prodRows[0];
+            if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
+              const cycle = Number(p.free_after_sales) + 1;
+              const prevCounter = (Number(p.sales_counter) - Number(it.quantity) + cycle * 10) % cycle;
+              await query('UPDATE products SET sales_counter = $1 WHERE id = $2', [prevCounter, it.product_id]);
+            } else if (!p.is_service && p.stock !== null) {
+              await query('UPDATE products SET stock = stock + $1 WHERE id = $2', [it.quantity, it.product_id]);
+            }
+          }
         }
       }
       await query('DELETE FROM sales WHERE id = $1', [saleId]);

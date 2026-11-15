@@ -63,7 +63,7 @@ export async function query(sqlText, params = []) {
 }
 
 export async function initDatabase() {
-  // Tabla de usuarios (Admin y Cajeros)
+  // 1. Tabla de usuarios (Admin y Cajeros)
   await query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -75,7 +75,7 @@ export async function initDatabase() {
     );
   `);
 
-  // Tabla de productos / servicios
+  // 2. Tabla de productos / servicios / servicios especiales
   await query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
@@ -84,15 +84,46 @@ export async function initDatabase() {
       price NUMERIC(10, 2) NOT NULL DEFAULT 0,
       stock INTEGER DEFAULT NULL,
       is_service BOOLEAN NOT NULL DEFAULT FALSE,
+      product_type TEXT NOT NULL DEFAULT 'producto',
+      free_after_sales INTEGER DEFAULT NULL,
+      sales_counter INTEGER NOT NULL DEFAULT 0,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
-  // Tabla de ventas (con cajero asignado)
+  // Asegurar nuevas columnas para Servicio Especial en tabla products existente
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS product_type TEXT NOT NULL DEFAULT 'producto';`);
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS free_after_sales INTEGER DEFAULT NULL;`);
+  await query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS sales_counter INTEGER NOT NULL DEFAULT 0;`);
+
+  // Sincronizar product_type en registros anteriores
+  await query(`
+    UPDATE products
+    SET product_type = 'servicio'
+    WHERE is_service = TRUE AND product_type = 'producto';
+  `);
+
+  // 3. Tabla de Promociones / Combos (Compra A + B = -$ descuento)
+  await query(`
+    CREATE TABLE IF NOT EXISTS promotions (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      product_a_id INTEGER NOT NULL,
+      product_b_id INTEGER NOT NULL,
+      discount_amount NUMERIC(10, 2) NOT NULL DEFAULT 10.00,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // 4. Tabla de ventas (con cajero y descuentos de promociones)
   await query(`
     CREATE TABLE IF NOT EXISTS sales (
       id SERIAL PRIMARY KEY,
+      subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      discount_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      promo_summary TEXT DEFAULT '',
       total NUMERIC(10, 2) NOT NULL,
       payment_method TEXT NOT NULL DEFAULT 'efectivo',
       amount_received NUMERIC(10, 2) NOT NULL DEFAULT 0,
@@ -104,11 +135,13 @@ export async function initDatabase() {
     );
   `);
 
-  // Asegurar columnas de cajero si la tabla sales ya existía antes
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER;`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_name TEXT DEFAULT 'General';`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS discount_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS promo_summary TEXT DEFAULT '';`);
 
-  // Tabla de conceptos por venta
+  // 5. Tabla de conceptos por venta
   await query(`
     CREATE TABLE IF NOT EXISTS sale_items (
       id SERIAL PRIMARY KEY,
@@ -117,11 +150,14 @@ export async function initDatabase() {
       product_name TEXT NOT NULL,
       quantity INTEGER NOT NULL DEFAULT 1,
       unit_price NUMERIC(10, 2) NOT NULL,
-      subtotal NUMERIC(10, 2) NOT NULL
+      subtotal NUMERIC(10, 2) NOT NULL,
+      is_free_reward BOOLEAN NOT NULL DEFAULT FALSE
     );
   `);
 
-  // Usuarios iniciales (Admin + 2 Cajeros de ejemplo)
+  await query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS is_free_reward BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+  // Usuarios iniciales
   const existingUsers = await query('SELECT COUNT(*)::int AS total FROM users WHERE active = TRUE');
   if (existingUsers[0] && Number(existingUsers[0].total) === 0) {
     const defaultUsers = [
@@ -134,21 +170,26 @@ export async function initDatabase() {
     }
   }
 
-  // Productos iniciales de ejemplo
-  const existingProds = await query('SELECT COUNT(*)::int AS total FROM products WHERE active = TRUE');
-  if (existingProds[0] && Number(existingProds[0].total) === 0) {
-    const samples = [
-      ['Servicio General / Consulta', 'Servicios', 150.0, null, true],
-      ['Mano de Obra / Instalación', 'Servicios', 300.0, null, true],
-      ['Mantenimiento Preventivo', 'Servicios', 450.0, null, true],
-      ['Artículo General A', 'Productos', 50.0, 25, false],
-      ['Artículo General B', 'Productos', 120.0, 15, false],
-      ['Accesorio / Refacción', 'Productos', 85.0, 30, false],
-    ];
-    for (const [name, category, price, stock, is_service] of samples) {
+  // Asegurar que exista al menos un Servicio Especial de ejemplo y una Promoción de ejemplo
+  const specialExists = await query(
+    "SELECT COUNT(*)::int AS total FROM products WHERE product_type = 'servicio_especial' AND active = TRUE"
+  );
+  if (specialExists[0] && Number(specialExists[0].total) === 0) {
+    await query(
+      `INSERT INTO products (name, category, price, stock, is_service, product_type, free_after_sales, sales_counter)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      ['Servicio Especial VIP (Cada 5 el 6º es Gratis)', 'Servicios Especiales', 200.0, null, true, 'servicio_especial', 5, 0]
+    );
+  }
+
+  const existingPromos = await query('SELECT COUNT(*)::int AS total FROM promotions WHERE active = TRUE');
+  if (existingPromos[0] && Number(existingPromos[0].total) === 0) {
+    const prods = await query('SELECT id, name FROM products WHERE active = TRUE ORDER BY id ASC LIMIT 2');
+    if (prods.length >= 2) {
       await query(
-        'INSERT INTO products (name, category, price, stock, is_service) VALUES ($1, $2, $3, $4, $5)',
-        [name, category, price, stock, is_service]
+        `INSERT INTO promotions (name, product_a_id, product_b_id, discount_amount)
+         VALUES ($1, $2, $3, $4)`,
+        [`Combo ${prods[0].name} + ${prods[1].name} (-$10)`, prods[0].id, prods[1].id, 10.0]
       );
     }
   }

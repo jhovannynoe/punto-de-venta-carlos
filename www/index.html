@@ -21,9 +21,7 @@
         </div>
       </div>
 
-      <div id="login-users-grid" class="login-users-grid">
-        <!-- Se llena dinámicamente con los cajeros y admin desde Neon -->
-      </div>
+      <div id="login-users-grid" class="login-users-grid"></div>
 
       <form id="form-login-pin" class="login-pin-box hidden">
         <div class="selected-user-banner">
@@ -89,6 +87,10 @@
           <span class="nav-icon">📦</span>
           <span>Catálogo (Admin)</span>
         </button>
+        <button class="nav-btn admin-only hidden" data-tab="promos" id="nav-tab-promos">
+          <span class="nav-icon">🎁</span>
+          <span>Promociones (Admin)</span>
+        </button>
         <button class="nav-btn admin-only hidden" data-tab="cashiers" id="nav-tab-cashiers">
           <span class="nav-icon">👥</span>
           <span>Cajeros (Admin)</span>
@@ -116,12 +118,15 @@
             <div class="pos-toolbar">
               <div class="search-box">
                 <span class="search-icon">🔍</span>
-                <input type="text" id="pos-search" placeholder="Buscar producto o servicio..." autocomplete="off" />
+                <input type="text" id="pos-search" placeholder="Buscar producto, servicio o servicio especial..." autocomplete="off" />
               </div>
               <button id="btn-quick-item" class="btn btn-accent">
                 ⚡ Concepto Libre
               </button>
             </div>
+
+            <!-- Banner informativo de Promociones Activas en Caja -->
+            <div id="pos-active-promos-bar" class="active-promos-bar hidden"></div>
 
             <div id="category-chips" class="category-chips"></div>
 
@@ -143,8 +148,16 @@
                 <strong id="cart-cashier-name">—</strong>
               </div>
               <div class="cart-summary-row">
-                <span>Artículos / Servicios</span>
-                <strong id="cart-count">0</strong>
+                <span>Subtotal conceptos:</span>
+                <strong id="cart-subtotal">$0.00</strong>
+              </div>
+              <!-- Descuentos por promociones aplicados automáticamente -->
+              <div id="cart-promo-discount-box" class="cart-promo-box hidden">
+                <div id="cart-promo-names" class="cart-promo-names"></div>
+                <div class="cart-promo-amount-row">
+                  <span>🎁 Descuento Promoción:</span>
+                  <strong id="cart-discount-amount">-$0.00</strong>
+                </div>
               </div>
               <div class="cart-total-row">
                 <span>TOTAL A COBRAR</span>
@@ -175,7 +188,6 @@
           </div>
         </div>
 
-        <!-- Summary Cards -->
         <div class="kpi-grid">
           <div class="kpi-card kpi-total">
             <span class="kpi-label">Total Vendido</span>
@@ -194,7 +206,6 @@
           </div>
         </div>
 
-        <!-- Desglose por Cajero (Solo visible para Admin) -->
         <div id="admin-cashier-breakdown-box" class="table-container admin-only hidden" style="margin-bottom: 1.5rem;">
           <table class="data-table">
             <thead>
@@ -217,8 +228,8 @@
       <section id="tab-catalog" class="tab-view">
         <div class="section-header">
           <div>
-            <h2>Panel Admin: Catálogo de Productos y Servicios</h2>
-            <p class="subtitle">Solo el Administrador puede crear, modificar precios, ajustar stock o eliminar conceptos</p>
+            <h2>Panel Admin: Catálogo (Productos, Servicios y Servicios Especiales)</h2>
+            <p class="subtitle">Configura productos con stock, servicios normales o 🌟 Servicios Especiales (N ventas = siguiente Gratis)</p>
           </div>
           <button id="btn-new-product" class="btn btn-primary">
             + Nuevo Producto / Servicio
@@ -237,7 +248,7 @@
                 <th>Categoría</th>
                 <th>Tipo</th>
                 <th>Precio</th>
-                <th>Existencia (Stock)</th>
+                <th>Stock / Meta Gratis</th>
                 <th>Acciones</th>
               </tr>
             </thead>
@@ -246,7 +257,35 @@
         </div>
       </section>
 
-      <!-- TAB 4 (SOLO ADMIN): GESTIÓN DE CAJEROS Y ADMINISTRADORES -->
+      <!-- TAB 4 (SOLO ADMIN): PROMOCIONES Y COMBOS (COMPRA A + B = -$ DESCUENTO) -->
+      <section id="tab-promos" class="tab-view">
+        <div class="section-header">
+          <div>
+            <h2>Panel Admin: Promociones y Combos Automáticos</h2>
+            <p class="subtitle">Ejemplo: Si el cliente compra <strong>A + B</strong> en el mismo ticket, se descuenta automáticamente <strong>-$X</strong> del total</p>
+          </div>
+          <button id="btn-new-promo" class="btn btn-primary">
+            + Nueva Promoción (A + B)
+          </button>
+        </div>
+
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nombre de la Promoción</th>
+                <th>Si compra (Concepto A)</th>
+                <th>Y compra (Concepto B)</th>
+                <th>Descuento al Total</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="promos-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- TAB 5 (SOLO ADMIN): GESTIÓN DE CAJEROS Y ADMINISTRADORES -->
       <section id="tab-cashiers" class="tab-view">
         <div class="section-header">
           <div>
@@ -298,6 +337,8 @@
           <span>Total a pagar</span>
           <strong id="checkout-modal-total">$0.00</strong>
         </div>
+
+        <div id="checkout-promo-banner" class="cart-promo-box hidden"></div>
 
         <label class="field-label">Método de pago</label>
         <div class="payment-methods">
@@ -369,7 +410,7 @@
     </div>
   </div>
 
-  <!-- MODAL (ADMIN): CREAR / EDITAR PRODUCTO O SERVICIO -->
+  <!-- MODAL (ADMIN): CREAR / EDITAR PRODUCTO, SERVICIO O SERVICIO ESPECIAL -->
   <div id="modal-product" class="modal-backdrop hidden">
     <div class="modal-card">
       <div class="modal-header">
@@ -379,32 +420,88 @@
       <form id="form-product" class="modal-body">
         <input type="hidden" id="prod-id" />
         <div class="form-group">
-          <label class="field-label" for="prod-name">Nombre del producto o servicio *</label>
-          <input type="text" id="prod-name" class="input" placeholder="Ej. Consulta, Instalación, Producto..." required />
+          <label class="field-label" for="prod-name">Nombre del concepto *</label>
+          <input type="text" id="prod-name" class="input" placeholder="Ej. Lavado VIP, Consulta, Artículo..." required />
         </div>
         <div class="form-row">
           <div class="form-group">
             <label class="field-label" for="prod-category">Categoría</label>
-            <input type="text" id="prod-category" class="input" placeholder="Ej. Servicios, General..." value="General" />
+            <input type="text" id="prod-category" class="input" placeholder="Ej. Servicios Especiales, General..." value="General" />
           </div>
           <div class="form-group">
-            <label class="field-label" for="prod-price">Precio de venta ($) *</label>
+            <label class="field-label" for="prod-price">Precio normal ($) *</label>
             <input type="number" id="prod-price" class="input" step="0.01" min="0" placeholder="0.00" required />
           </div>
         </div>
+
         <div class="form-group">
-          <label class="checkbox-label">
-            <input type="checkbox" id="prod-is-service" />
-            <span>Es un <strong>Servicio</strong> (no maneja límite de inventario/stock)</span>
-          </label>
+          <label class="field-label" for="prod-type">Tipo de Producto / Servicio *</label>
+          <select id="prod-type" class="input">
+            <option value="producto">📦 Producto Físico (con control de stock)</option>
+            <option value="servicio">⚡ Servicio Normal (sin límite de stock)</option>
+            <option value="servicio_especial">🌟 Servicio Especial (a determinadas ventas el siguiente es GRATIS)</option>
+          </select>
         </div>
+
+        <!-- Opciones si es Producto Físico -->
         <div id="prod-stock-group" class="form-group">
           <label class="field-label" for="prod-stock">Cantidad en inventario (Stock actual)</label>
           <input type="number" id="prod-stock" class="input" step="1" min="0" value="10" />
         </div>
+
+        <!-- Opciones si es Servicio Especial -->
+        <div id="prod-special-group" class="special-config-box hidden">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="field-label" for="prod-free-after">¿Después de cuántas ventas el siguiente es GRATIS? *</label>
+              <input type="number" id="prod-free-after" class="input" step="1" min="1" value="5" />
+            </div>
+            <div class="form-group">
+              <label class="field-label" for="prod-sales-counter">Ventas acumuladas hoy en el ciclo</label>
+              <input type="number" id="prod-sales-counter" class="input" step="1" min="0" value="0" />
+            </div>
+          </div>
+          <p class="subtitle">
+            💡 Ejemplo: Si pones <strong>5</strong>, las ventas 1 a 5 se cobran a precio normal y la venta <strong>#6 sale GRATIS ($0.00)</strong> automáticamente, reiniciando el contador.
+          </p>
+        </div>
+
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-close="modal-product">Cancelar</button>
           <button type="submit" class="btn btn-primary">Guardar en Neon</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL (ADMIN): CREAR / EDITAR PROMOCIÓN (COMPRA A + B = -$ DESCUENTO) -->
+  <div id="modal-promo" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-promo-title">Nueva Promoción (Compra A + B)</h3>
+        <button class="modal-close" data-close="modal-promo">✕</button>
+      </div>
+      <form id="form-promo" class="modal-body">
+        <input type="hidden" id="promo-id" />
+        <div class="form-group">
+          <label class="field-label" for="promo-name">Nombre de la promoción *</label>
+          <input type="text" id="promo-name" class="input" placeholder="Ej. Combo Servicio + Accesorio (-$10)" required />
+        </div>
+        <div class="form-group">
+          <label class="field-label" for="promo-prod-a">Si compra (Producto / Servicio A) *</label>
+          <select id="promo-prod-a" class="input" required></select>
+        </div>
+        <div class="form-group">
+          <label class="field-label" for="promo-prod-b">Y también compra (Producto / Servicio B) *</label>
+          <select id="promo-prod-b" class="input" required></select>
+        </div>
+        <div class="form-group">
+          <label class="field-label" for="promo-discount">Descuento a restar del Total ($) *</label>
+          <input type="number" id="promo-discount" class="input input-lg" step="0.01" min="0.01" placeholder="10.00" value="10" required />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close="modal-promo">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Guardar Promoción</button>
         </div>
       </form>
     </div>
