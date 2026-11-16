@@ -69,6 +69,9 @@
           <div class="status-row">
             <span id="db-status-dot" class="status-dot connecting"></span>
             <span id="db-status-text">Conectando a Neon...</span>
+            <button id="btn-sync-pending" class="btn-sync-badge hidden" title="Sincronizar ventas guardadas sin conexión">
+              ☁️ Sincronizar (<span id="pending-sync-count">0</span>)
+            </button>
           </div>
         </div>
       </div>
@@ -190,19 +193,24 @@
 
         <div class="kpi-grid">
           <div class="kpi-card kpi-total">
-            <span class="kpi-label">Total Vendido</span>
+            <span class="kpi-label">Total Neto en Caja</span>
             <strong id="kpi-total-sales" class="kpi-value">$0.00</strong>
             <span id="kpi-sales-count" class="kpi-sub">0 ventas registradas</span>
           </div>
           <div class="kpi-card kpi-cash">
-            <span class="kpi-label">💵 Efectivo en Caja</span>
+            <span class="kpi-label">💵 Efectivo Neto</span>
             <strong id="kpi-cash-sales" class="kpi-value">$0.00</strong>
             <span class="kpi-sub">Dinero físico a entregar</span>
           </div>
           <div class="kpi-card kpi-card">
             <span class="kpi-label">💳 Tarjeta / Transferencia</span>
             <strong id="kpi-digital-sales" class="kpi-value">$0.00</strong>
-            <span class="kpi-sub">Cobros electrónicos</span>
+            <span class="kpi-sub">Cobros electrónicos netos</span>
+          </div>
+          <div class="kpi-card kpi-returns">
+            <span class="kpi-label">↩️ Devoluciones</span>
+            <strong id="kpi-returns-total" class="kpi-value">-$0.00</strong>
+            <span id="kpi-returns-count" class="kpi-sub">0 devoluciones hoy</span>
           </div>
         </div>
 
@@ -212,9 +220,10 @@
               <tr>
                 <th>Cajero</th>
                 <th>Ventas Realizadas</th>
-                <th>💵 Efectivo</th>
+                <th>💵 Efectivo Neto</th>
                 <th>💳 Tarjeta / Transf.</th>
-                <th>Total Cobrado</th>
+                <th>↩️ Devoluciones</th>
+                <th>Total Neto</th>
               </tr>
             </thead>
             <tbody id="cashier-breakdown-tbody"></tbody>
@@ -536,6 +545,73 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-close="modal-cashier">Cancelar</button>
           <button type="submit" class="btn btn-primary">Guardar Usuario</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: DEVOLUCIÓN PARCIAL O TOTAL (PUNTOS 1 AL 4) -->
+  <div id="modal-return" class="modal-backdrop hidden">
+    <div class="modal-card modal-card-lg">
+      <div class="modal-header">
+        <div>
+          <h3 id="modal-return-title">↩️ Procesar Devolución</h3>
+          <p id="modal-return-subtitle" class="subtitle"></p>
+        </div>
+        <button class="modal-close" data-close="modal-return">✕</button>
+      </div>
+      <form id="form-return" class="modal-body">
+        <input type="hidden" id="return-sale-id" />
+
+        <div class="return-toolbar">
+          <span class="field-label" style="margin:0;">1. Selecciona productos/piezas a devolver y su destino:</span>
+          <button type="button" id="btn-return-select-all" class="btn btn-secondary btn-sm">
+            Seleccionar Todo (Devolución Total)
+          </button>
+        </div>
+
+        <div id="return-items-list" class="return-items-list"></div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="field-label" for="return-refund-amount">2. Monto a reembolsar al cliente ($) *</label>
+            <input type="number" id="return-refund-amount" class="input input-lg" step="0.01" min="0" required />
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="return-reason">3. Motivo de la devolución *</label>
+            <input type="text" id="return-reason" class="input" placeholder="Ej. Producto defectuoso, error de cobro..." required />
+            <div class="quick-reason-chips">
+              <button type="button" class="chip-btn btn-reason-chip" data-reason="Error en cobro">Error en cobro</button>
+              <button type="button" class="chip-btn btn-reason-chip" data-reason="Defecto / Garantía">Defecto / Garantía</button>
+              <button type="button" class="chip-btn btn-reason-chip" data-reason="Cambio de opinión">Cambio de opinión</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Autorización por PIN de Admin si es Cajero -->
+        <div id="return-admin-auth-box" class="return-auth-box">
+          <div id="return-admin-pin-group">
+            <label class="field-label" for="return-admin-pin">🔒 4. Autorización requerida: Ingresa PIN de Administrador *</label>
+            <input
+              type="password"
+              id="return-admin-pin"
+              class="input"
+              placeholder="PIN de Administrador (ej. 1234)"
+              maxlength="8"
+              inputmode="numeric"
+              autocomplete="off"
+            />
+          </div>
+          <div id="return-admin-direct-badge" class="hidden" style="color: #fcd34d; font-size: 0.88rem; font-weight: 600;">
+            🛡️ Sesión de Administrador activa: Autorización directa habilitada.
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close="modal-return">Cancelar</button>
+          <button type="submit" id="btn-confirm-return" class="btn btn-danger btn-lg">
+            ↩️ Confirmar Devolución
+          </button>
         </div>
       </form>
     </div>

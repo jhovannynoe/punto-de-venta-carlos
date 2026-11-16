@@ -277,7 +277,8 @@ async function handleApi(req, res, urlObj) {
           `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
-                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
              AND cashier_id = $2
@@ -289,7 +290,8 @@ async function handleApi(req, res, urlObj) {
           `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
-                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
            ORDER BY created_at DESC`,
@@ -300,7 +302,8 @@ async function handleApi(req, res, urlObj) {
           `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
-                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
+                  note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
            ORDER BY created_at DESC
            LIMIT 100`
@@ -313,11 +316,20 @@ async function handleApi(req, res, urlObj) {
 
       const saleIds = salesRows.map((s) => s.id);
       const itemsRows = await query(
-        `SELECT id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price,
-                subtotal::float AS subtotal, COALESCE(is_free_reward, FALSE) AS is_free_reward
+        `SELECT id, sale_id, product_id, product_name, quantity, COALESCE(returned_qty, 0) AS returned_qty,
+                unit_price::float AS unit_price, subtotal::float AS subtotal, COALESCE(is_free_reward, FALSE) AS is_free_reward
          FROM sale_items
          WHERE sale_id = ANY($1::int[])
          ORDER BY id ASC`,
+        [saleIds]
+      );
+
+      const returnsRows = await query(
+        `SELECT id, sale_id, refund_amount::float AS refund_amount, reason, return_to_stock,
+                items_summary, processed_by_name, authorized_by_name, created_at
+         FROM sale_returns
+         WHERE sale_id = ANY($1::int[])
+         ORDER BY created_at ASC`,
         [saleIds]
       );
 
@@ -327,9 +339,16 @@ async function handleApi(req, res, urlObj) {
         itemsBySale[item.sale_id].push(item);
       }
 
+      const returnsBySale = {};
+      for (const ret of returnsRows) {
+        if (!returnsBySale[ret.sale_id]) returnsBySale[ret.sale_id] = [];
+        returnsBySale[ret.sale_id].push(ret);
+      }
+
       const result = salesRows.map((s) => ({
         ...s,
         items: itemsBySale[s.id] || [],
+        returns: returnsBySale[s.id] || [],
       }));
 
       return sendJson(res, 200, result);
@@ -354,11 +373,11 @@ async function handleApi(req, res, urlObj) {
       const cashierName = String(body.cashier_name || 'General').trim() || 'General';
 
       const saleRows = await query(
-        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, status, refunded_total)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'completada', 0)
          RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
                    total::float AS total, payment_method, amount_received::float AS amount_received,
-                   change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
+                   change_given::float AS change_given, note, cashier_id, cashier_name, status, refunded_total::float AS refunded_total, created_at`,
         [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
       );
       const sale = saleRows[0];
@@ -372,9 +391,9 @@ async function handleApi(req, res, urlObj) {
         const isFreeReward = Boolean(it.is_free_reward);
 
         const itemRow = await query(
-          `INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, subtotal, is_free_reward)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price, subtotal::float AS subtotal, is_free_reward`,
+          `INSERT INTO sale_items (sale_id, product_id, product_name, quantity, returned_qty, unit_price, subtotal, is_free_reward)
+           VALUES ($1, $2, $3, $4, 0, $5, $6, $7)
+           RETURNING id, sale_id, product_id, product_name, quantity, returned_qty, unit_price::float AS unit_price, subtotal::float AS subtotal, is_free_reward`,
           [sale.id, productId, it.product_name, qty, unitPrice, itemSubtotal, isFreeReward]
         );
         insertedItems.push(itemRow[0]);
@@ -398,7 +417,129 @@ async function handleApi(req, res, urlObj) {
         }
       }
 
-      return sendJson(res, 201, { ...sale, items: insertedItems });
+      return sendJson(res, 201, { ...sale, items: insertedItems, returns: [] });
+    }
+
+    // DEVOLUCIÓN PARCIAL O TOTAL DE VENTA (CON MOTIVO, MERMA/STOCK Y PIN DE ADMIN)
+    const saleReturnMatch = pathname.match(/^\/api\/sales\/(\d+)\/return$/);
+    if (saleReturnMatch && method === 'POST') {
+      const saleId = Number(saleReturnMatch[1]);
+      const body = await parseBody(req);
+      const returnItems = Array.isArray(body.items) ? body.items : [];
+      const reason = String(body.reason || '').trim();
+      const refundAmount = Math.max(0, Number(body.refund_amount || 0));
+      const processedByName = String(body.processed_by_name || 'General').trim();
+      let authorizedByName = String(body.authorized_by_name || '').trim();
+      const isAdminSession = Boolean(body.is_admin_session);
+      const adminPin = String(body.admin_pin || '').trim();
+
+      if (!reason) {
+        return sendJson(res, 400, { error: 'El motivo de la devolución es obligatorio' });
+      }
+
+      if (!isAdminSession) {
+        if (!adminPin) {
+          return sendJson(res, 401, { error: 'Se requiere el PIN de un Administrador para autorizar la devolución' });
+        }
+        const adminRows = await query(
+          "SELECT id, name FROM users WHERE role = 'admin' AND pin = $1 AND active = TRUE LIMIT 1",
+          [adminPin]
+        );
+        if (adminRows.length === 0) {
+          return sendJson(res, 401, { error: 'PIN de Administrador incorrecto' });
+        }
+        authorizedByName = adminRows[0].name;
+      } else if (!authorizedByName) {
+        authorizedByName = processedByName;
+      }
+
+      const summaryParts = [];
+      let anyToStock = false;
+
+      for (const reqItem of returnItems) {
+        const retQty = Number(reqItem.return_qty || 0);
+        if (retQty <= 0) continue;
+
+        const saleItemId = Number(reqItem.sale_item_id);
+        const returnToStock = Boolean(reqItem.return_to_stock);
+        if (returnToStock) anyToStock = true;
+
+        const dbItemRows = await query(
+          'SELECT id, product_id, product_name, quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE id = $1 AND sale_id = $2',
+          [saleItemId, saleId]
+        );
+        if (!dbItemRows[0]) continue;
+        const dbItem = dbItemRows[0];
+        const availableQty = Math.max(0, Number(dbItem.quantity) - Number(dbItem.returned_qty));
+        const effectiveRetQty = Math.min(retQty, availableQty);
+        if (effectiveRetQty <= 0) continue;
+
+        await query(
+          'UPDATE sale_items SET returned_qty = COALESCE(returned_qty, 0) + $1 WHERE id = $2',
+          [effectiveRetQty, saleItemId]
+        );
+
+        let destinoTag = '';
+        if (dbItem.product_id) {
+          const prodRows = await query(
+            'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
+            [dbItem.product_id]
+          );
+          if (prodRows[0]) {
+            const p = prodRows[0];
+            if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
+              const cycle = Number(p.free_after_sales) + 1;
+              const prevCounter = (Number(p.sales_counter) - effectiveRetQty + cycle * 10) % cycle;
+              await query('UPDATE products SET sales_counter = $1 WHERE id = $2', [prevCounter, dbItem.product_id]);
+              destinoTag = ' (contador revertido)';
+            } else if (!p.is_service && p.stock !== null) {
+              if (returnToStock) {
+                await query('UPDATE products SET stock = stock + $1 WHERE id = $2', [effectiveRetQty, dbItem.product_id]);
+                destinoTag = ' (a stock)';
+              } else {
+                destinoTag = ' (merma/dañado)';
+              }
+            }
+          }
+        }
+
+        summaryParts.push(`${effectiveRetQty}x ${dbItem.product_name}${destinoTag}`);
+      }
+
+      if (summaryParts.length === 0) {
+        return sendJson(res, 400, { error: 'Selecciona al menos una unidad para devolver' });
+      }
+
+      const itemsSummary = summaryParts.join(', ');
+
+      await query(
+        `INSERT INTO sale_returns (sale_id, refund_amount, reason, return_to_stock, items_summary, processed_by_name, authorized_by_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [saleId, refundAmount, reason, anyToStock, itemsSummary, processedByName, authorizedByName]
+      );
+
+      // Evaluar si la venta quedó devuelta parcial o totalmente
+      const allSaleItems = await query(
+        'SELECT quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE sale_id = $1',
+        [saleId]
+      );
+      const allReturned = allSaleItems.every((it) => Number(it.returned_qty) >= Number(it.quantity));
+      const newStatus = allReturned ? 'devuelta_total' : 'devuelta_parcial';
+
+      await query(
+        `UPDATE sales
+         SET refunded_total = LEAST(total, COALESCE(refunded_total, 0) + $1),
+             status = $2
+         WHERE id = $3`,
+        [refundAmount, newStatus, saleId]
+      );
+
+      return sendJson(res, 200, {
+        ok: true,
+        status: newStatus,
+        authorized_by_name: authorizedByName,
+        items_summary: itemsSummary,
+      });
     }
 
     const saleMatch = pathname.match(/^\/api\/sales\/(\d+)$/);

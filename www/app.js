@@ -1,8 +1,78 @@
-// Conexión directa a Neon Serverless HTTP API (para APK Android y modo directo) + API local
+// Conexión directa a Neon Serverless HTTP API + Respaldo Offline Automático (LocalStorage + Auto-Sync)
 const NEON_CONN_STR =
   'postgresql://neondb_owner:npg_v80ptgIKUSzN@ep-billowing-shape-bex6iinx-pooler.c-9.us-east-2.aws.neon.tech/neondb?sslmode=require';
 const NEON_HTTP_URL =
   'https://ep-billowing-shape-bex6iinx-pooler.c-9.us-east-2.aws.neon.tech/sql';
+
+// ==========================================
+// ALMACENAMIENTO OFFLINE Y COLA DE SINCRONIZACIÓN
+// ==========================================
+const OfflineStore = {
+  KEYS: {
+    USERS: 'pos_cache_users_v1',
+    PRODUCTS: 'pos_cache_products_v1',
+    PROMOS: 'pos_cache_promos_v1',
+    SALES: 'pos_cache_sales_v1',
+    QUEUE: 'pos_pending_sales_queue_v1',
+  },
+
+  get(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  },
+
+  set(key, val) {
+    try {
+      localStorage.setItem(key, JSON.stringify(val));
+    } catch (e) {
+      console.warn('Error guardando caché local:', e);
+    }
+  },
+
+  getPendingQueue() {
+    return this.get(this.KEYS.QUEUE, []);
+  },
+
+  addPendingSale(salePayload) {
+    const queue = this.getPendingQueue();
+    const localSale = {
+      ...salePayload,
+      id: `LOCAL-${Date.now().toString().slice(-4)}`,
+      pending_sync: true,
+      created_at: new Date().toISOString(),
+    };
+    queue.push(localSale);
+    this.set(this.KEYS.QUEUE, queue);
+
+    // Actualizar stock y contador de Servicio Especial en el caché local para que las siguientes ventas offline sean exactas
+    const cachedProducts = this.get(this.KEYS.PRODUCTS, []);
+    for (const it of salePayload.items || []) {
+      if (it.product_id) {
+        const p = cachedProducts.find((prod) => Number(prod.id) === Number(it.product_id));
+        if (p) {
+          const qty = Number(it.quantity) || 1;
+          if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
+            const cycle = Number(p.free_after_sales) + 1;
+            p.sales_counter = (Number(p.sales_counter || 0) + qty) % cycle;
+          } else if (p.product_type === 'producto' && p.stock !== null) {
+            p.stock = Math.max(0, Number(p.stock) - qty);
+          }
+        }
+      }
+    }
+    this.set(this.KEYS.PRODUCTS, cachedProducts);
+    return localSale;
+  },
+
+  removePendingSale(localId) {
+    const queue = this.getPendingQueue().filter((s) => s.id !== localId);
+    this.set(this.KEYS.QUEUE, queue);
+  },
+};
 
 async function neonQuery(sqlText, params = []) {
   const res = await fetch(NEON_HTTP_URL, {
@@ -50,10 +120,6 @@ async function ensureNeonSchemaDirect() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  await neonQuery(`ALTER TABLE products ADD COLUMN IF NOT EXISTS product_type TEXT NOT NULL DEFAULT 'producto';`);
-  await neonQuery(`ALTER TABLE products ADD COLUMN IF NOT EXISTS free_after_sales INTEGER DEFAULT NULL;`);
-  await neonQuery(`ALTER TABLE products ADD COLUMN IF NOT EXISTS sales_counter INTEGER NOT NULL DEFAULT 0;`);
-
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS promotions (
       id SERIAL PRIMARY KEY,
@@ -65,7 +131,6 @@ async function ensureNeonSchemaDirect() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS sales (
       id SERIAL PRIMARY KEY,
@@ -79,14 +144,13 @@ async function ensureNeonSchemaDirect() {
       note TEXT DEFAULT '',
       cashier_id INTEGER,
       cashier_name TEXT DEFAULT 'General',
+      status TEXT NOT NULL DEFAULT 'completada',
+      refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
-  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS discount_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
-  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS promo_summary TEXT DEFAULT '';`);
-  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER;`);
-  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_name TEXT DEFAULT 'General';`);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
 
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS sale_items (
@@ -95,67 +159,141 @@ async function ensureNeonSchemaDirect() {
       product_id INTEGER,
       product_name TEXT NOT NULL,
       quantity INTEGER NOT NULL DEFAULT 1,
+      returned_qty INTEGER NOT NULL DEFAULT 0,
       unit_price NUMERIC(10, 2) NOT NULL,
       subtotal NUMERIC(10, 2) NOT NULL,
       is_free_reward BOOLEAN NOT NULL DEFAULT FALSE
     );
   `);
-  await neonQuery(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS is_free_reward BOOLEAN NOT NULL DEFAULT FALSE;`);
+  await neonQuery(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS returned_qty INTEGER NOT NULL DEFAULT 0;`);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS sale_returns (
+      id SERIAL PRIMARY KEY,
+      sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+      refund_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT '',
+      return_to_stock BOOLEAN NOT NULL DEFAULT TRUE,
+      items_summary TEXT NOT NULL DEFAULT '',
+      processed_by_name TEXT NOT NULL DEFAULT 'General',
+      authorized_by_name TEXT NOT NULL DEFAULT 'Administrador',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 }
 
-// Capa de datos unificada (Servidor Web o Directo a Neon desde APK)
+// Capa de datos unificada con soporte Offline-First + Auto-Sync
 const DataService = {
   useDirectNeon: false,
+  isOffline: false,
 
   async init() {
-    if (window.location.protocol === 'file:' || window.Capacitor) {
-      this.useDirectNeon = true;
-      await ensureNeonSchemaDirect();
-      return { mode: 'Neon Cloud (Directo APK)' };
+    if (!navigator.onLine) {
+      this.isOffline = true;
+      return { mode: 'Modo Sin Conexión (Respaldo Local)', offline: true };
     }
+
+    if (window.location.protocol === 'file:' || window.Capacitor) {
+      try {
+        this.useDirectNeon = true;
+        await ensureNeonSchemaDirect();
+        this.isOffline = false;
+        return { mode: 'Neon Cloud (Directo APK)', offline: false };
+      } catch {
+        this.isOffline = true;
+        return { mode: 'Modo Sin Conexión (Respaldo Local)', offline: true };
+      }
+    }
+
     try {
       const res = await fetch('/api/health');
       if (res.ok) {
         this.useDirectNeon = false;
-        return { mode: 'Neon Cloud (Servidor Web)' };
+        this.isOffline = false;
+        return { mode: 'Neon Cloud (Servidor Web)', offline: false };
       }
     } catch {
-      // Fallback directo a Neon HTTP
+      // Intentar directo a Neon o pasar a modo offline
     }
-    this.useDirectNeon = true;
-    await ensureNeonSchemaDirect();
-    return { mode: 'Neon Cloud (Directo)' };
+
+    try {
+      this.useDirectNeon = true;
+      await neonQuery('SELECT 1');
+      this.isOffline = false;
+      return { mode: 'Neon Cloud (Directo)', offline: false };
+    } catch {
+      this.isOffline = true;
+      return { mode: 'Modo Sin Conexión (Respaldo Local)', offline: true };
+    }
   },
 
   async getUsers() {
-    if (!this.useDirectNeon) {
-      const res = await fetch('/api/users');
-      if (res.ok) return res.json();
+    const defaultFallbackUsers = [
+      { id: 1, name: 'Administrador', role: 'admin', pin: '1234' },
+      { id: 2, name: 'Cajero 1', role: 'cajero', pin: '1111' },
+      { id: 3, name: 'Cajero 2', role: 'cajero', pin: '2222' },
+    ];
+    try {
+      let rows;
+      if (!this.useDirectNeon) {
+        const res = await fetch('/api/users');
+        if (!res.ok) throw new Error('API offline');
+        rows = await res.json();
+      } else {
+        rows = await neonQuery(`
+          SELECT id, name, role, pin, created_at
+          FROM users
+          WHERE active = TRUE
+          ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name ASC
+        `);
+      }
+      this.isOffline = false;
+      OfflineStore.set(OfflineStore.KEYS.USERS, rows);
+      updateConnectionUI();
+      return rows;
+    } catch {
+      this.isOffline = true;
+      updateConnectionUI();
+      return OfflineStore.get(OfflineStore.KEYS.USERS, defaultFallbackUsers);
     }
-    return await neonQuery(`
-      SELECT id, name, role, pin, created_at
-      FROM users
-      WHERE active = TRUE
-      ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name ASC
-    `);
   },
 
   async verifyPin(userId, pin) {
-    if (!this.useDirectNeon) {
-      const res = await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, pin }),
-      });
-      if (res.ok) return res.json();
-      if (res.status === 401) throw new Error('PIN incorrecto');
+    const cleanPin = String(pin).trim();
+    try {
+      if (!this.isOffline) {
+        if (!this.useDirectNeon) {
+          const res = await fetch('/api/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, pin: cleanPin }),
+          });
+          if (res.ok) return res.json();
+          if (res.status === 401) throw new Error('PIN_INVALID');
+        } else {
+          const rows = await neonQuery(
+            'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
+            [Number(userId), cleanPin]
+          );
+          if (rows.length === 0) throw new Error('PIN_INVALID');
+          return rows[0];
+        }
+      }
+    } catch (err) {
+      if (err.message === 'PIN_INVALID') throw new Error('PIN incorrecto');
+      this.isOffline = true;
+      updateConnectionUI();
     }
-    const rows = await neonQuery(
-      'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
-      [Number(userId), String(pin).trim()]
-    );
-    if (rows.length === 0) throw new Error('PIN incorrecto');
-    return rows[0];
+
+    // Verificación offline contra el caché local de usuarios
+    const cachedUsers = OfflineStore.get(OfflineStore.KEYS.USERS, [
+      { id: 1, name: 'Administrador', role: 'admin', pin: '1234' },
+      { id: 2, name: 'Cajero 1', role: 'cajero', pin: '1111' },
+      { id: 3, name: 'Cajero 2', role: 'cajero', pin: '2222' },
+    ]);
+    const match = cachedUsers.find((u) => Number(u.id) === Number(userId) && String(u.pin) === cleanPin);
+    if (!match) throw new Error('PIN incorrecto');
+    return { id: match.id, name: match.name, role: match.role };
   },
 
   async saveUser(userObj) {
@@ -195,25 +333,38 @@ const DataService = {
   },
 
   async getProducts() {
-    if (!this.useDirectNeon) {
-      const res = await fetch('/api/products');
-      if (res.ok) return res.json();
+    try {
+      let rows;
+      if (!this.useDirectNeon) {
+        const res = await fetch('/api/products');
+        if (!res.ok) throw new Error('Offline');
+        rows = await res.json();
+      } else {
+        rows = await neonQuery(`
+          SELECT id, name, category, price::float AS price, stock, is_service,
+                 COALESCE(product_type, CASE WHEN is_service THEN 'servicio' ELSE 'producto' END) AS product_type,
+                 free_after_sales, COALESCE(sales_counter, 0) AS sales_counter, created_at
+          FROM products
+          WHERE active = TRUE
+          ORDER BY category ASC, name ASC
+        `);
+      }
+      const normalized = rows.map((r) => ({
+        ...r,
+        price: Number(r.price),
+        stock: r.stock !== null ? Number(r.stock) : null,
+        free_after_sales: r.free_after_sales !== null ? Number(r.free_after_sales) : null,
+        sales_counter: Number(r.sales_counter || 0),
+      }));
+      this.isOffline = false;
+      OfflineStore.set(OfflineStore.KEYS.PRODUCTS, normalized);
+      updateConnectionUI();
+      return normalized;
+    } catch {
+      this.isOffline = true;
+      updateConnectionUI();
+      return OfflineStore.get(OfflineStore.KEYS.PRODUCTS, []);
     }
-    const rows = await neonQuery(`
-      SELECT id, name, category, price::float AS price, stock, is_service,
-             COALESCE(product_type, CASE WHEN is_service THEN 'servicio' ELSE 'producto' END) AS product_type,
-             free_after_sales, COALESCE(sales_counter, 0) AS sales_counter, created_at
-      FROM products
-      WHERE active = TRUE
-      ORDER BY category ASC, name ASC
-    `);
-    return rows.map((r) => ({
-      ...r,
-      price: Number(r.price),
-      stock: r.stock !== null ? Number(r.stock) : null,
-      free_after_sales: r.free_after_sales !== null ? Number(r.free_after_sales) : null,
-      sales_counter: Number(r.sales_counter || 0),
-    }));
   },
 
   async saveProduct(prod) {
@@ -298,21 +449,30 @@ const DataService = {
   },
 
   async getPromotions() {
-    if (!this.useDirectNeon) {
-      const res = await fetch('/api/promotions');
-      if (res.ok) return res.json();
+    try {
+      let rows;
+      if (!this.useDirectNeon) {
+        const res = await fetch('/api/promotions');
+        if (!res.ok) throw new Error('Offline');
+        rows = await res.json();
+      } else {
+        rows = await neonQuery(`
+          SELECT pr.id, pr.name, pr.product_a_id, pr.product_b_id,
+                 pr.discount_amount::float AS discount_amount, pr.active,
+                 pa.name AS product_a_name, pb.name AS product_b_name
+          FROM promotions pr
+          LEFT JOIN products pa ON pa.id = pr.product_a_id
+          LEFT JOIN products pb ON pb.id = pr.product_b_id
+          WHERE pr.active = TRUE
+          ORDER BY pr.id DESC
+        `);
+      }
+      const normalized = rows.map((r) => ({ ...r, discount_amount: Number(r.discount_amount) }));
+      OfflineStore.set(OfflineStore.KEYS.PROMOS, normalized);
+      return normalized;
+    } catch {
+      return OfflineStore.get(OfflineStore.KEYS.PROMOS, []);
     }
-    const rows = await neonQuery(`
-      SELECT pr.id, pr.name, pr.product_a_id, pr.product_b_id,
-             pr.discount_amount::float AS discount_amount, pr.active,
-             pa.name AS product_a_name, pb.name AS product_b_name
-      FROM promotions pr
-      LEFT JOIN products pa ON pa.id = pr.product_a_id
-      LEFT JOIN products pb ON pb.id = pr.product_b_id
-      WHERE pr.active = TRUE
-      ORDER BY pr.id DESC
-    `);
-    return rows.map((r) => ({ ...r, discount_amount: Number(r.discount_amount) }));
   },
 
   async savePromotion(promo) {
@@ -355,7 +515,7 @@ const DataService = {
     return true;
   },
 
-  async createSale(salePayload) {
+  async sendSaleToCloud(salePayload) {
     if (!this.useDirectNeon) {
       const res = await fetch('/api/sales', {
         method: 'POST',
@@ -363,7 +523,9 @@ const DataService = {
         body: JSON.stringify(salePayload),
       });
       if (res.ok) return res.json();
+      throw new Error('Servidor no disponible');
     }
+
     const items = salePayload.items || [];
     const subtotal = items.reduce((acc, it) => acc + Number(it.subtotal ?? Number(it.unit_price) * Number(it.quantity)), 0);
     const discountTotal = Math.max(0, Number(salePayload.discount_total || 0));
@@ -422,76 +584,332 @@ const DataService = {
     return { ...sale, items: insertedItems };
   },
 
+  async createSale(salePayload) {
+    const items = salePayload.items || [];
+    const subtotal = items.reduce((acc, it) => acc + Number(it.subtotal ?? Number(it.unit_price) * Number(it.quantity)), 0);
+    const discountTotal = Math.max(0, Number(salePayload.discount_total || 0));
+    const total = Math.max(0, subtotal - discountTotal);
+    const paymentMethod = salePayload.payment_method || 'efectivo';
+    const amountReceived = paymentMethod === 'efectivo' ? Number(salePayload.amount_received ?? total) : total;
+    const changeGiven = paymentMethod === 'efectivo' ? Math.max(0, amountReceived - total) : 0;
+
+    const fullPayload = {
+      ...salePayload,
+      subtotal,
+      discount_total: discountTotal,
+      total,
+      amount_received: amountReceived,
+      change_given: changeGiven,
+    };
+
+    try {
+      if (!navigator.onLine) throw new Error('Sin conexión');
+      const cloudSale = await this.sendSaleToCloud(fullPayload);
+      this.isOffline = false;
+      updateConnectionUI();
+      return cloudSale;
+    } catch {
+      // Guardar venta en cola local segura sin perder nada
+      this.isOffline = true;
+      const localSale = OfflineStore.addPendingSale(fullPayload);
+      updateConnectionUI();
+      return localSale;
+    }
+  },
+
+  async syncPendingSales() {
+    const queue = OfflineStore.getPendingQueue();
+    if (queue.length === 0 || !navigator.onLine) return 0;
+
+    let syncedCount = 0;
+    for (const pendingSale of queue) {
+      try {
+        await this.sendSaleToCloud(pendingSale);
+        OfflineStore.removePendingSale(pendingSale.id);
+        syncedCount++;
+      } catch {
+        break;
+      }
+    }
+    if (syncedCount > 0) {
+      this.isOffline = false;
+      updateConnectionUI();
+      await Promise.all([loadProducts(), loadSales()]);
+      showToast(`☁️ ${syncedCount} venta(s) offline sincronizada(s) con Neon`);
+    }
+    return syncedCount;
+  },
+
   async getSales(dateStr, cashierId = 'all') {
+    const pendingQueue = OfflineStore.getPendingQueue().filter((s) => {
+      if (cashierId && cashierId !== 'all' && Number(s.cashier_id) !== Number(cashierId)) return false;
+      return true;
+    });
+
+    try {
+      let cloudSales = [];
+      if (!this.useDirectNeon) {
+        const params = new URLSearchParams();
+        if (dateStr) params.set('date', dateStr);
+        if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
+        const res = await fetch(`/api/sales?${params.toString()}`);
+        if (!res.ok) throw new Error('Offline');
+        cloudSales = await res.json();
+      } else {
+        let salesRows;
+        if (dateStr && cashierId && cashierId !== 'all') {
+          salesRows = await neonQuery(
+            `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                    COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                    amount_received::float AS amount_received, change_given::float AS change_given,
+                    note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+             FROM sales
+             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+               AND cashier_id = $2
+             ORDER BY created_at DESC`,
+            [dateStr, Number(cashierId)]
+          );
+        } else if (dateStr) {
+          salesRows = await neonQuery(
+            `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                    COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                    amount_received::float AS amount_received, change_given::float AS change_given,
+                    note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+             FROM sales
+             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+             ORDER BY created_at DESC`,
+            [dateStr]
+          );
+        } else {
+          salesRows = await neonQuery(
+            `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
+                    COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
+                    amount_received::float AS amount_received, change_given::float AS change_given,
+                    note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+             FROM sales
+             ORDER BY created_at DESC
+             LIMIT 100`
+          );
+        }
+        if (salesRows.length > 0) {
+          const saleIds = salesRows.map((s) => Number(s.id));
+          const itemsRows = await neonQuery(
+            `SELECT id, sale_id, product_id, product_name, quantity, COALESCE(returned_qty, 0) AS returned_qty,
+                    unit_price::float AS unit_price, subtotal::float AS subtotal, COALESCE(is_free_reward, FALSE) AS is_free_reward
+             FROM sale_items
+             WHERE sale_id = ANY($1::int[])
+             ORDER BY id ASC`,
+            [saleIds]
+          );
+          let returnsRows = [];
+          try {
+            returnsRows = await neonQuery(
+              `SELECT id, sale_id, refund_amount::float AS refund_amount, reason, return_to_stock,
+                      items_summary, processed_by_name, authorized_by_name, created_at
+               FROM sale_returns
+               WHERE sale_id = ANY($1::int[])
+               ORDER BY created_at ASC`,
+              [saleIds]
+            );
+          } catch {
+            // Si aún no existe la tabla sale_returns en sesión directa, crearla al vuelo
+            await ensureNeonSchemaDirect();
+          }
+          const itemsBySale = {};
+          for (const item of itemsRows) {
+            if (!itemsBySale[item.sale_id]) itemsBySale[item.sale_id] = [];
+            itemsBySale[item.sale_id].push(item);
+          }
+          const returnsBySale = {};
+          for (const ret of returnsRows) {
+            if (!returnsBySale[ret.sale_id]) returnsBySale[ret.sale_id] = [];
+            returnsBySale[ret.sale_id].push(ret);
+          }
+          cloudSales = salesRows.map((s) => ({
+            ...s,
+            subtotal: Number(s.subtotal),
+            discount_total: Number(s.discount_total || 0),
+            total: Number(s.total),
+            refunded_total: Number(s.refunded_total || 0),
+            status: s.status || 'completada',
+            amount_received: Number(s.amount_received),
+            change_given: Number(s.change_given),
+            items: itemsBySale[s.id] || [],
+            returns: returnsBySale[s.id] || [],
+          }));
+        }
+      }
+      this.isOffline = false;
+      OfflineStore.set(OfflineStore.KEYS.SALES, cloudSales);
+      updateConnectionUI();
+      return [...pendingQueue, ...cloudSales];
+    } catch {
+      this.isOffline = true;
+      updateConnectionUI();
+      const cachedSales = OfflineStore.get(OfflineStore.KEYS.SALES, []).filter((s) => {
+        if (cashierId && cashierId !== 'all' && Number(s.cashier_id) !== Number(cashierId)) return false;
+        return true;
+      });
+      return [...pendingQueue, ...cachedSales];
+    }
+  },
+
+  async processSaleReturn(saleId, payload) {
+    const returnItems = Array.isArray(payload.items) ? payload.items : [];
+    const reason = String(payload.reason || '').trim();
+    const refundAmount = Math.max(0, Number(payload.refund_amount || 0));
+    const processedByName = String(payload.processed_by_name || 'General').trim();
+    let authorizedByName = String(payload.authorized_by_name || '').trim();
+    const isAdminSession = Boolean(payload.is_admin_session);
+    const adminPin = String(payload.admin_pin || '').trim();
+
+    if (!reason) throw new Error('El motivo de la devolución es obligatorio');
+
+    // Si es venta en cola local sin subir aún
+    if (String(saleId).startsWith('LOCAL-')) {
+      if (!isAdminSession) {
+        const cachedUsers = OfflineStore.get(OfflineStore.KEYS.USERS, [
+          { id: 1, name: 'Administrador', role: 'admin', pin: '1234' },
+        ]);
+        const adminUser = cachedUsers.find((u) => u.role === 'admin' && String(u.pin) === adminPin);
+        if (!adminUser) throw new Error('PIN de Administrador incorrecto');
+        authorizedByName = adminUser.name;
+      } else if (!authorizedByName) {
+        authorizedByName = processedByName;
+      }
+      OfflineStore.removePendingSale(String(saleId));
+      updateConnectionUI();
+      return { ok: true, status: 'devuelta_total', authorized_by_name: authorizedByName };
+    }
+
     if (!this.useDirectNeon) {
-      const params = new URLSearchParams();
-      if (dateStr) params.set('date', dateStr);
-      if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
-      const res = await fetch(`/api/sales?${params.toString()}`);
-      if (res.ok) return res.json();
+      const res = await fetch(`/api/sales/${saleId}/return`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Error al procesar la devolución');
+      }
+      return data;
     }
-    let salesRows;
-    if (dateStr && cashierId && cashierId !== 'all') {
-      salesRows = await neonQuery(
-        `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
-                COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
-                amount_received::float AS amount_received, change_given::float AS change_given,
-                note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
-         FROM sales
-         WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
-           AND cashier_id = $2
-         ORDER BY created_at DESC`,
-        [dateStr, Number(cashierId)]
+
+    // Modo Directo Neon (APK / Serverless)
+    if (!isAdminSession) {
+      if (!adminPin) {
+        throw new Error('Se requiere el PIN de un Administrador para autorizar la devolución');
+      }
+      const adminRows = await neonQuery(
+        "SELECT id, name FROM users WHERE role = 'admin' AND pin = $1 AND active = TRUE LIMIT 1",
+        [adminPin]
       );
-    } else if (dateStr) {
-      salesRows = await neonQuery(
-        `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
-                COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
-                amount_received::float AS amount_received, change_given::float AS change_given,
-                note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
-         FROM sales
-         WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
-         ORDER BY created_at DESC`,
-        [dateStr]
-      );
-    } else {
-      salesRows = await neonQuery(
-        `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
-                COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
-                amount_received::float AS amount_received, change_given::float AS change_given,
-                note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name, created_at
-         FROM sales
-         ORDER BY created_at DESC
-         LIMIT 100`
-      );
+      if (adminRows.length === 0) {
+        throw new Error('PIN de Administrador incorrecto');
+      }
+      authorizedByName = adminRows[0].name;
+    } else if (!authorizedByName) {
+      authorizedByName = processedByName;
     }
-    if (salesRows.length === 0) return [];
-    const saleIds = salesRows.map((s) => Number(s.id));
-    const itemsRows = await neonQuery(
-      `SELECT id, sale_id, product_id, product_name, quantity, unit_price::float AS unit_price,
-              subtotal::float AS subtotal, COALESCE(is_free_reward, FALSE) AS is_free_reward
-       FROM sale_items
-       WHERE sale_id = ANY($1::int[])
-       ORDER BY id ASC`,
-      [saleIds]
+
+    const numSaleId = Number(saleId);
+    const summaryParts = [];
+    let anyToStock = false;
+
+    for (const reqItem of returnItems) {
+      const retQty = Number(reqItem.return_qty || 0);
+      if (retQty <= 0) continue;
+
+      const saleItemId = Number(reqItem.sale_item_id);
+      const returnToStock = Boolean(reqItem.return_to_stock);
+      if (returnToStock) anyToStock = true;
+
+      const dbItemRows = await neonQuery(
+        'SELECT id, product_id, product_name, quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE id = $1 AND sale_id = $2',
+        [saleItemId, numSaleId]
+      );
+      if (!dbItemRows[0]) continue;
+      const dbItem = dbItemRows[0];
+      const availableQty = Math.max(0, Number(dbItem.quantity) - Number(dbItem.returned_qty));
+      const effectiveRetQty = Math.min(retQty, availableQty);
+      if (effectiveRetQty <= 0) continue;
+
+      await neonQuery(
+        'UPDATE sale_items SET returned_qty = COALESCE(returned_qty, 0) + $1 WHERE id = $2',
+        [effectiveRetQty, saleItemId]
+      );
+
+      let destinoTag = '';
+      if (dbItem.product_id) {
+        const prodRows = await neonQuery(
+          'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
+          [Number(dbItem.product_id)]
+        );
+        if (prodRows[0]) {
+          const p = prodRows[0];
+          if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
+            const cycle = Number(p.free_after_sales) + 1;
+            const prevCounter = (Number(p.sales_counter) - effectiveRetQty + cycle * 10) % cycle;
+            await neonQuery('UPDATE products SET sales_counter = $1 WHERE id = $2', [prevCounter, Number(dbItem.product_id)]);
+            destinoTag = ' (contador revertido)';
+          } else if (!p.is_service && p.stock !== null) {
+            if (returnToStock) {
+              await neonQuery('UPDATE products SET stock = stock + $1 WHERE id = $2', [effectiveRetQty, Number(dbItem.product_id)]);
+              destinoTag = ' (a stock)';
+            } else {
+              destinoTag = ' (merma/dañado)';
+            }
+          }
+        }
+      }
+
+      summaryParts.push(`${effectiveRetQty}x ${dbItem.product_name}${destinoTag}`);
+    }
+
+    if (summaryParts.length === 0) {
+      throw new Error('Selecciona al menos una unidad para devolver');
+    }
+
+    const itemsSummary = summaryParts.join(', ');
+
+    await neonQuery(
+      `INSERT INTO sale_returns (sale_id, refund_amount, reason, return_to_stock, items_summary, processed_by_name, authorized_by_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [numSaleId, refundAmount, reason, anyToStock, itemsSummary, processedByName, authorizedByName]
     );
-    const itemsBySale = {};
-    for (const item of itemsRows) {
-      if (!itemsBySale[item.sale_id]) itemsBySale[item.sale_id] = [];
-      itemsBySale[item.sale_id].push(item);
-    }
-    return salesRows.map((s) => ({
-      ...s,
-      subtotal: Number(s.subtotal),
-      discount_total: Number(s.discount_total || 0),
-      total: Number(s.total),
-      amount_received: Number(s.amount_received),
-      change_given: Number(s.change_given),
-      items: itemsBySale[s.id] || [],
-    }));
+
+    const allSaleItems = await neonQuery(
+      'SELECT quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE sale_id = $1',
+      [numSaleId]
+    );
+    const allReturned = allSaleItems.every((it) => Number(it.returned_qty) >= Number(it.quantity));
+    const newStatus = allReturned ? 'devuelta_total' : 'devuelta_parcial';
+
+    await neonQuery(
+      `UPDATE sales
+       SET refunded_total = LEAST(total, COALESCE(refunded_total, 0) + $1),
+           status = $2
+       WHERE id = $3`,
+      [refundAmount, newStatus, numSaleId]
+    );
+
+    return {
+      ok: true,
+      status: newStatus,
+      authorized_by_name: authorizedByName,
+      items_summary: itemsSummary,
+    };
   },
 
   async deleteSale(saleId) {
+    if (String(saleId).startsWith('LOCAL-')) {
+      OfflineStore.removePendingSale(String(saleId));
+      updateConnectionUI();
+      return true;
+    }
     if (!this.useDirectNeon) {
       const res = await fetch(`/api/sales/${saleId}`, { method: 'DELETE' });
       if (res.ok) return true;
@@ -519,6 +937,29 @@ const DataService = {
     return true;
   },
 };
+
+function updateConnectionUI() {
+  const dotEl = document.getElementById('db-status-dot');
+  const txtEl = document.getElementById('db-status-text');
+  const syncBtn = document.getElementById('btn-sync-pending');
+  const syncCountEl = document.getElementById('pending-sync-count');
+
+  const pendingCount = OfflineStore.getPendingQueue().length;
+  if (syncCountEl) syncCountEl.textContent = pendingCount;
+  if (syncBtn) syncBtn.classList.toggle('hidden', pendingCount === 0);
+
+  if (!dotEl || !txtEl) return;
+  if (DataService.isOffline || !navigator.onLine) {
+    dotEl.className = 'status-dot offline';
+    txtEl.textContent =
+      pendingCount > 0
+        ? `Modo Sin Conexión (${pendingCount} venta(s) en equipo)`
+        : 'Modo Sin Conexión (Respaldo Local Activo)';
+  } else {
+    dotEl.className = 'status-dot connected';
+    txtEl.textContent = 'Conectado: Neon Cloud (Sincronizado)';
+  }
+}
 
 // Estado de la aplicación
 const state = {
@@ -596,7 +1037,6 @@ function calculateSpecialServicePricing(prod, quantity) {
 }
 
 function recalculateCartPromotions() {
-  // 1. Recalcular cada línea del carrito (incluyendo Servicios Especiales gratis)
   for (const item of state.cart) {
     if (item.product_id) {
       const prod = state.products.find((p) => Number(p.id) === Number(item.product_id));
@@ -615,7 +1055,6 @@ function recalculateCartPromotions() {
 
   const subtotal = state.cart.reduce((sum, it) => sum + Number(it.subtotal), 0);
 
-  // 2. Evaluar promociones A + B activas
   const qtyByProd = {};
   for (const it of state.cart) {
     if (it.product_id) {
@@ -648,7 +1087,6 @@ function recalculateCartPromotions() {
     }
   }
 
-  // El descuento nunca puede superar el subtotal a pagar
   discountTotal = Math.min(subtotal, discountTotal);
   const finalTotal = Math.max(0, subtotal - discountTotal);
 
@@ -832,7 +1270,6 @@ function renderPosProducts() {
       const stockNum = isProduct && p.stock !== null ? Number(p.stock) : null;
       const outOfStock = isProduct && stockNum !== null && stockNum <= 0;
 
-      // Cantidad ya en el carrito para calcular si la siguiente unidad de Servicio Especial es gratis
       const inCartItem = state.cart.find((it) => it.product_id && Number(it.product_id) === Number(p.id));
       const inCartQty = inCartItem ? Number(inCartItem.quantity) : 0;
 
@@ -1244,44 +1681,65 @@ function openCashierModal(user = null) {
 }
 
 // ==========================================
-// MÓDULO 5: HISTORIAL Y CORTE DE CAJA
+// MÓDULO 5: HISTORIAL, CORTE DE CAJA Y DEVOLUCIONES (PUNTOS 1 AL 4)
 // ==========================================
+let activeReturnDraft = null;
+
 function renderSalesHistory() {
   const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const listEl = document.getElementById('sales-history-list');
 
-  const totalSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
-  const cashSales = state.sales
-    .filter((s) => s.payment_method === 'efectivo')
-    .reduce((sum, s) => sum + Number(s.total), 0);
-  const digitalSales = state.sales
-    .filter((s) => s.payment_method !== 'efectivo')
-    .reduce((sum, s) => sum + Number(s.total), 0);
+  const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
+  const totalRefunded = state.sales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
+  const netSales = Math.max(0, grossSales - totalRefunded);
 
-  document.getElementById('kpi-total-sales').textContent = formatMoney(totalSales);
-  document.getElementById('kpi-sales-count').textContent = `${state.sales.length} venta(s) registrada(s)`;
-  document.getElementById('kpi-cash-sales').textContent = formatMoney(cashSales);
-  document.getElementById('kpi-digital-sales').textContent = formatMoney(digitalSales);
+  const cashSalesNet = state.sales
+    .filter((s) => s.payment_method === 'efectivo')
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+  const digitalSalesNet = state.sales
+    .filter((s) => s.payment_method !== 'efectivo')
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+
+  const returnsCount = state.sales.reduce(
+    (count, s) => count + ((s.returns && s.returns.length) || (Number(s.refunded_total || 0) > 0 ? 1 : 0)),
+    0
+  );
+
+  document.getElementById('kpi-total-sales').textContent = formatMoney(netSales);
+  document.getElementById('kpi-sales-count').textContent =
+    totalRefunded > 0
+      ? `${state.sales.length} venta(s) • Bruto: ${formatMoney(grossSales)}`
+      : `${state.sales.length} venta(s) registrada(s)`;
+  document.getElementById('kpi-cash-sales').textContent = formatMoney(cashSalesNet);
+  document.getElementById('kpi-digital-sales').textContent = formatMoney(digitalSalesNet);
+
+  const kpiRetTotalEl = document.getElementById('kpi-returns-total');
+  const kpiRetCountEl = document.getElementById('kpi-returns-count');
+  if (kpiRetTotalEl) kpiRetTotalEl.textContent = `-${formatMoney(totalRefunded)}`;
+  if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) registrada(s)`;
 
   if (isAdmin) {
     const byCashier = {};
     for (const s of state.sales) {
       const cName = s.cashier_name || 'General';
       if (!byCashier[cName]) {
-        byCashier[cName] = { count: 0, cash: 0, digital: 0, total: 0 };
+        byCashier[cName] = { count: 0, cash: 0, digital: 0, refunded: 0, net: 0 };
       }
+      const saleRefund = Number(s.refunded_total || 0);
+      const saleNet = Math.max(0, Number(s.total) - saleRefund);
       byCashier[cName].count += 1;
-      byCashier[cName].total += Number(s.total);
+      byCashier[cName].refunded += saleRefund;
+      byCashier[cName].net += saleNet;
       if (s.payment_method === 'efectivo') {
-        byCashier[cName].cash += Number(s.total);
+        byCashier[cName].cash += saleNet;
       } else {
-        byCashier[cName].digital += Number(s.total);
+        byCashier[cName].digital += saleNet;
       }
     }
     const breakdownTbody = document.getElementById('cashier-breakdown-tbody');
     const names = Object.keys(byCashier);
     if (names.length === 0) {
-      breakdownTbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">Sin ventas en esta fecha</td></tr>`;
+      breakdownTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas en esta fecha</td></tr>`;
     } else {
       breakdownTbody.innerHTML = names
         .map(
@@ -1291,7 +1749,8 @@ function renderSalesHistory() {
             <td>${byCashier[name].count} venta(s)</td>
             <td><strong>${formatMoney(byCashier[name].cash)}</strong></td>
             <td>${formatMoney(byCashier[name].digital)}</td>
-            <td><strong style="color:var(--success)">${formatMoney(byCashier[name].total)}</strong></td>
+            <td style="color:#fca5a5;">${byCashier[name].refunded > 0 ? `-${formatMoney(byCashier[name].refunded)}` : '$0.00'}</td>
+            <td><strong style="color:var(--success)">${formatMoney(byCashier[name].net)}</strong></td>
           </tr>
         `
         )
@@ -1311,16 +1770,60 @@ function renderSalesHistory() {
         minute: '2-digit',
       });
       const itemsSummary = (s.items || [])
-        .map((it) => `${it.quantity}x ${it.product_name}${it.is_free_reward ? ' (🎁 Gratis)' : ''}`)
+        .map((it) => {
+          const retQty = Number(it.returned_qty || 0);
+          const retLabel = retQty > 0 ? ` [↩️ ${retQty} dev.]` : '';
+          return `${it.quantity}x ${it.product_name}${it.is_free_reward ? ' (🎁 Gratis)' : ''}${retLabel}`;
+        })
         .join(', ');
+
+      const pendingBadge = s.pending_sync
+        ? `<span class="sale-badge transferencia">⏳ Guardada en equipo (Pendiente subir)</span>`
+        : '';
+
+      const refundedAmt = Number(s.refunded_total || 0);
+      const netSaleAmt = Math.max(0, Number(s.total) - refundedAmt);
+      const status = s.status || 'completada';
+
+      let statusBadge = '';
+      if (status === 'devuelta_total') {
+        statusBadge = `<span class="sale-badge devuelta_total">🔴 DEVUELTA TOTAL (-${formatMoney(refundedAmt)})</span>`;
+      } else if (status === 'devuelta_parcial' || refundedAmt > 0) {
+        statusBadge = `<span class="sale-badge devuelta_parcial">🟠 DEVUELTA PARCIAL (-${formatMoney(refundedAmt)})</span>`;
+      }
+
+      const returnsHistoryHtml =
+        s.returns && s.returns.length > 0
+          ? `<div class="sale-returns-box">
+               ${s.returns
+                 .map((ret) => {
+                   const rTime = new Date(ret.created_at).toLocaleTimeString('es-MX', {
+                     hour: '2-digit',
+                     minute: '2-digit',
+                   });
+                   return `<div>
+                     <strong>↩️ [${rTime}] Reembolso -${formatMoney(ret.refund_amount)}:</strong>
+                     ${escapeHtml(ret.items_summary)} •
+                     <em>Motivo: ${escapeHtml(ret.reason)}</em> •
+                     🛡️ Autorizó: <strong>${escapeHtml(ret.authorized_by_name)}</strong>
+                     (Turno: ${escapeHtml(ret.processed_by_name)})
+                   </div>`;
+                 })
+                 .join('')}
+             </div>`
+          : '';
+
+      const canReturn = status !== 'devuelta_total';
 
       return `
         <div class="sale-card">
-          <div>
+          <div style="flex:1; min-width:260px;">
             <div class="sale-card-header">
               <strong>Folio #${s.id}</strong>
               <span class="sale-badge ${s.payment_method}">${s.payment_method}</span>
               <span class="cashier-tag">🧑‍💼 ${escapeHtml(s.cashier_name || 'General')}</span>
+              ${statusBadge}
+              ${pendingBadge}
               <span style="color:var(--text-muted); font-size:0.85rem;">🕒 ${timeStr}</span>
             </div>
             <div class="sale-items-summary">${escapeHtml(itemsSummary || 'Venta general')}</div>
@@ -1339,13 +1842,25 @@ function renderSalesHistory() {
               }
               ${s.note ? ` • Nota: ${escapeHtml(s.note)}` : ''}
             </div>
+            ${returnsHistoryHtml}
           </div>
           <div class="sale-card-right">
-            <span class="sale-total-amount">${formatMoney(s.total)}</span>
+            <div style="text-align:right;">
+              ${
+                refundedAmt > 0
+                  ? `<div style="font-size:0.78rem; color:var(--text-muted); text-decoration:line-through;">Bruto: ${formatMoney(
+                      s.total
+                    )}</div>`
+                  : ''
+              }
+              <span class="sale-total-amount" style="${status === 'devuelta_total' ? 'color:#fca5a5;' : ''}">
+                ${formatMoney(netSaleAmt)}
+              </span>
+            </div>
             <button class="btn btn-secondary btn-sm btn-view-ticket" data-id="${s.id}">🧾 Ticket</button>
             ${
-              isAdmin
-                ? `<button class="btn btn-danger btn-sm btn-cancel-sale" data-id="${s.id}">Cancelar</button>`
+              canReturn
+                ? `<button class="btn btn-danger btn-sm btn-open-return" data-id="${s.id}">↩️ Devolver</button>`
                 : ''
             }
           </div>
@@ -1356,35 +1871,176 @@ function renderSalesHistory() {
 
   listEl.querySelectorAll('.btn-view-ticket').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const sale = state.sales.find((s) => Number(s.id) === Number(btn.dataset.id));
+      const sale = state.sales.find((s) => String(s.id) === String(btn.dataset.id));
       if (sale) showSaleTicketModal(sale);
     });
   });
 
-  if (isAdmin) {
-    listEl.querySelectorAll('.btn-cancel-sale').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const id = Number(btn.dataset.id);
-        if (confirm(`¿Cancelar la venta Folio #${id}? Se devolverá el stock y el contador de promociones.`)) {
-          await DataService.deleteSale(id);
-          await Promise.all([loadProducts(), loadSales()]);
-          showToast(`Venta #${id} cancelada`);
-        }
-      });
+  listEl.querySelectorAll('.btn-open-return').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sale = state.sales.find((s) => String(s.id) === String(btn.dataset.id));
+      if (sale) openReturnModal(sale);
     });
+  });
+}
+
+function openReturnModal(sale) {
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  const remainingSaleBalance = Math.max(0, Number(sale.total) - Number(sale.refunded_total || 0));
+
+  // Construir borrador de conceptos disponibles para devolver
+  const draftItems = (sale.items || [])
+    .map((it) => {
+      const alreadyReturned = Number(it.returned_qty || 0);
+      const availableQty = Math.max(0, Number(it.quantity) - alreadyReturned);
+      const prod = it.product_id ? state.products.find((p) => Number(p.id) === Number(it.product_id)) : null;
+      const isPhysicalProduct = prod
+        ? (prod.product_type || (prod.is_service ? 'servicio' : 'producto')) === 'producto' && prod.stock !== null
+        : false;
+      const effectiveUnitPaid = Number(it.quantity) > 0 ? Number(it.subtotal) / Number(it.quantity) : Number(it.unit_price);
+
+      return {
+        sale_item_id: it.id,
+        product_id: it.product_id,
+        product_name: it.product_name,
+        original_qty: Number(it.quantity),
+        already_returned: alreadyReturned,
+        available_qty: availableQty,
+        return_qty: 0,
+        unit_price_effective: effectiveUnitPaid,
+        is_physical: isPhysicalProduct,
+        return_to_stock: true,
+      };
+    })
+    .filter((it) => it.available_qty > 0);
+
+  if (draftItems.length === 0) {
+    showToast('⚠️ Todos los artículos de esta venta ya fueron devueltos.');
+    return;
   }
+
+  // Si el ticket solo tiene 1 artículo con 1 pieza disponible, pre-seleccionarlo para agilizar
+  if (draftItems.length === 1 && draftItems[0].available_qty === 1) {
+    draftItems[0].return_qty = 1;
+  }
+
+  activeReturnDraft = {
+    sale,
+    remainingSaleBalance,
+    items: draftItems,
+  };
+
+  document.getElementById('return-sale-id').value = sale.id;
+  document.getElementById('modal-return-title').textContent = `↩️ Devolución de Venta Folio #${sale.id}`;
+  document.getElementById('modal-return-subtitle').textContent = `Cobrada por ${
+    sale.cashier_name || 'General'
+  } (${sale.payment_method.toUpperCase()}) • Saldo disponible a devolver: ${formatMoney(remainingSaleBalance)}`;
+
+  document.getElementById('return-reason').value = '';
+  document.getElementById('return-admin-pin').value = '';
+
+  const pinGroup = document.getElementById('return-admin-pin-group');
+  const directBadge = document.getElementById('return-admin-direct-badge');
+  if (isAdmin) {
+    pinGroup.classList.add('hidden');
+    directBadge.classList.remove('hidden');
+    directBadge.textContent = `🛡️ Sesión de Administrador activa (${state.currentUser.name}): Autorización directa habilitada.`;
+  } else {
+    pinGroup.classList.remove('hidden');
+    directBadge.classList.add('hidden');
+  }
+
+  renderReturnModalItems();
+  document.getElementById('modal-return').classList.remove('hidden');
+}
+
+function renderReturnModalItems() {
+  if (!activeReturnDraft) return;
+  const listEl = document.getElementById('return-items-list');
+
+  listEl.innerHTML = activeReturnDraft.items
+    .map((it, idx) => {
+      const isSelected = it.return_qty > 0;
+      const stockSelectorHtml = it.is_physical
+        ? `<select class="return-stock-select" data-idx="${idx}">
+             <option value="stock" ${it.return_to_stock ? 'selected' : ''}>📦 Regresar a Stock vendible</option>
+             <option value="merma" ${!it.return_to_stock ? 'selected' : ''}>⚠️ Merma / Dañado (No sumar a stock)</option>
+           </select>`
+        : `<span style="font-size:0.76rem; color:var(--text-muted);">⚡ Servicio</span>`;
+
+      return `
+        <div class="return-item-row ${isSelected ? 'active-return' : ''}">
+          <div style="flex:1; min-width:180px;">
+            <div style="font-weight:700; font-size:0.92rem;">${escapeHtml(it.product_name)}</div>
+            <div style="font-size:0.78rem; color:var(--text-muted);">
+              Disponibles para devolver: <strong>${it.available_qty}</strong> de ${it.original_qty}
+              • (${formatMoney(it.unit_price_effective)} c/u)
+            </div>
+          </div>
+          <div>${stockSelectorHtml}</div>
+          <div class="cart-item-controls">
+            <button type="button" class="qty-btn btn-ret-qty" data-idx="${idx}" data-delta="-1">−</button>
+            <span class="qty-val">${it.return_qty}</span>
+            <button type="button" class="qty-btn btn-ret-qty" data-idx="${idx}" data-delta="1">+</button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  listEl.querySelectorAll('.btn-ret-qty').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.idx);
+      const delta = Number(btn.dataset.delta);
+      const item = activeReturnDraft.items[idx];
+      if (!item) return;
+      item.return_qty = Math.max(0, Math.min(item.available_qty, item.return_qty + delta));
+      renderReturnModalItems();
+    });
+  });
+
+  listEl.querySelectorAll('.return-stock-select').forEach((sel) => {
+    sel.addEventListener('change', (e) => {
+      const idx = Number(sel.dataset.idx);
+      const item = activeReturnDraft.items[idx];
+      if (!item) return;
+      item.return_to_stock = e.target.value === 'stock';
+    });
+  });
+
+  // Calcular reembolso proporcional sugerido
+  const allSelectedFull = activeReturnDraft.items.every((it) => it.return_qty === it.available_qty);
+  let suggestedRefund = 0;
+  if (allSelectedFull) {
+    suggestedRefund = activeReturnDraft.remainingSaleBalance;
+  } else {
+    const rawSum = activeReturnDraft.items.reduce(
+      (sum, it) => sum + it.return_qty * it.unit_price_effective,
+      0
+    );
+    const saleSubtotal = Number(activeReturnDraft.sale.subtotal || activeReturnDraft.sale.total || 1);
+    const ratio = saleSubtotal > 0 ? Number(activeReturnDraft.sale.total) / saleSubtotal : 1;
+    suggestedRefund = Math.min(activeReturnDraft.remainingSaleBalance, rawSum * ratio);
+  }
+
+  const refundInput = document.getElementById('return-refund-amount');
+  refundInput.max = activeReturnDraft.remainingSaleBalance.toFixed(2);
+  refundInput.value = suggestedRefund.toFixed(2);
 }
 
 function showSaleTicketModal(sale) {
   const dateStr = new Date(sale.created_at).toLocaleString('es-MX');
   const itemsHtml = (sale.items || [])
-    .map(
-      (it) => `
+    .map((it) => {
+      const retQty = Number(it.returned_qty || 0);
+      return `
       <div style="display:flex; justify-content:space-between; margin: 4px 0;">
-        <span>${it.quantity} x ${escapeHtml(it.product_name)}${it.is_free_reward ? ' (🎁 PROMO GRATIS)' : ''}</span>
+        <span>${it.quantity} x ${escapeHtml(it.product_name)}${it.is_free_reward ? ' (🎁 PROMO GRATIS)' : ''}${
+        retQty > 0 ? ` (↩️ ${retQty} dev.)` : ''
+      }</span>
         <strong>${formatMoney(it.subtotal)}</strong>
-      </div>`
-    )
+      </div>`;
+    })
     .join('');
 
   const discountHtml =
@@ -1399,11 +2055,42 @@ function showSaleTicketModal(sale) {
          </div>`
       : '';
 
+  const refundedAmt = Number(sale.refunded_total || 0);
+  const netTotal = Math.max(0, Number(sale.total) - refundedAmt);
+
+  const returnsTicketHtml =
+    refundedAmt > 0
+      ? `<div style="border-top:1px dashed #9ca3af; margin-top:6px; padding-top:6px;">
+           <div style="display:flex; justify-content:space-between;">
+             <span>↩️ Devoluciones:</span>
+             <strong>-${formatMoney(refundedAmt)}</strong>
+           </div>
+           ${(sale.returns || [])
+             .map(
+               (r) =>
+                 `<div style="font-size:0.75rem; margin-top:2px;">• ${escapeHtml(r.items_summary)} (${escapeHtml(
+                   r.reason
+                 )}) - Autorizó: ${escapeHtml(r.authorized_by_name)}</div>`
+             )
+             .join('')}
+           <div style="display:flex; justify-content:space-between; font-weight:bold; margin-top:4px;">
+             <span>TOTAL NETO:</span>
+             <span>${formatMoney(netTotal)}</span>
+           </div>
+         </div>`
+      : '';
+
   document.getElementById('receipt-title').textContent = `Ticket de Venta #${sale.id}`;
   document.getElementById('receipt-content').innerHTML = `
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <h3 style="margin:0;">PUNTO DE VENTA CARLOS</h3>
-      <div>Folio #${sale.id}</div>
+      <div>Folio #${sale.id} ${
+    sale.status === 'devuelta_total'
+      ? '(DEVUELTA TOTAL)'
+      : sale.status === 'devuelta_parcial'
+      ? '(DEVUELTA PARCIAL)'
+      : ''
+  }</div>
       <div>Atendió: <strong>${escapeHtml(sale.cashier_name || 'General')}</strong></div>
       <div style="font-size:0.8rem;">${dateStr}</div>
     </div>
@@ -1412,9 +2099,10 @@ function showSaleTicketModal(sale) {
     </div>
     ${discountHtml}
     <div style="display:flex; justify-content:space-between; font-size:1.1rem; font-weight:bold;">
-      <span>TOTAL:</span>
+      <span>TOTAL COBRADO:</span>
       <span>${formatMoney(sale.total)}</span>
     </div>
+    ${returnsTicketHtml}
     <div style="margin-top:6px; font-size:0.85rem;">
       <div>Método de pago: <strong>${sale.payment_method.toUpperCase()}</strong></div>
       ${
@@ -1433,16 +2121,26 @@ function showSaleTicketModal(sale) {
 }
 
 function showDailyCorteModal() {
-  const totalSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
+  const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
+  const totalRefunded = state.sales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
+  const netSales = Math.max(0, grossSales - totalRefunded);
+
   const cashSales = state.sales
     .filter((s) => s.payment_method === 'efectivo')
-    .reduce((sum, s) => sum + Number(s.total), 0);
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
   const cardSales = state.sales
     .filter((s) => s.payment_method === 'tarjeta')
-    .reduce((sum, s) => sum + Number(s.total), 0);
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
   const transferSales = state.sales
     .filter((s) => s.payment_method === 'transferencia')
-    .reduce((sum, s) => sum + Number(s.total), 0);
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+
+  const allReturns = [];
+  for (const s of state.sales) {
+    for (const r of s.returns || []) {
+      allReturns.push({ saleId: s.id, ...r });
+    }
+  }
 
   const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const scopeLabel = !isAdmin
@@ -1450,6 +2148,24 @@ function showDailyCorteModal() {
     : state.selectedCashierFilter === 'all'
     ? 'Todos los Cajeros (General)'
     : `Cajero filtrado`;
+
+  const returnsDetailHtml =
+    allReturns.length > 0
+      ? `<div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px; font-size:0.8rem;">
+           <strong>DETALLE DE DEVOLUCIONES (${allReturns.length}):</strong>
+           ${allReturns
+             .map(
+               (r) =>
+                 `<div style="margin-top:4px;">
+                    • Folio #${r.saleId}: <strong>-${formatMoney(r.refund_amount)}</strong> (${escapeHtml(
+                   r.items_summary
+                 )})<br/>
+                    Motivo: ${escapeHtml(r.reason)} | Autorizó: ${escapeHtml(r.authorized_by_name)}
+                  </div>`
+             )
+             .join('')}
+         </div>`
+      : '';
 
   document.getElementById('receipt-title').textContent = `Corte de Caja (${state.selectedDate})`;
   document.getElementById('receipt-content').innerHTML = `
@@ -1461,21 +2177,32 @@ function showDailyCorteModal() {
     </div>
     <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>💵 Efectivo en Caja:</span>
+        <span>Ventas Brutas:</span>
+        <strong>${formatMoney(grossSales)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>↩️ Devoluciones (${allReturns.length}):</span>
+        <strong>-${formatMoney(totalRefunded)}</strong>
+      </div>
+    </div>
+    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>💵 Efectivo Neto en Caja:</span>
         <strong>${formatMoney(cashSales)}</strong>
       </div>
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>💳 Tarjeta:</span>
+        <span>💳 Tarjeta Neto:</span>
         <strong>${formatMoney(cardSales)}</strong>
       </div>
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>📲 Transferencia:</span>
+        <span>📲 Transferencia Neto:</span>
         <strong>${formatMoney(transferSales)}</strong>
       </div>
     </div>
+    ${returnsDetailHtml}
     <div style="display:flex; justify-content:space-between; font-size:1.15rem; font-weight:bold;">
-      <span>TOTAL INGRESOS:</span>
-      <span>${formatMoney(totalSales)}</span>
+      <span>TOTAL NETO EN CAJA:</span>
+      <span>${formatMoney(netSales)}</span>
     </div>
   `;
   document.getElementById('modal-receipt').classList.remove('hidden');
@@ -1566,7 +2293,7 @@ function openProductModal(prod = null) {
   document.getElementById('modal-product').classList.remove('hidden');
 }
 
-// Carga de datos desde Neon
+// Carga de datos desde Neon o Caché Local
 async function loadUsers() {
   state.users = await DataService.getUsers();
   renderLoginScreen();
@@ -1601,6 +2328,33 @@ async function loadSales() {
 async function initApp() {
   const dateInput = document.getElementById('history-date');
   dateInput.value = state.selectedDate;
+
+  // Eventos de Red (Auto-Sync cuando regresa el internet)
+  window.addEventListener('online', async () => {
+    showToast('🌐 Conexión a internet restablecida');
+    await DataService.syncPendingSales();
+    await Promise.all([loadUsers(), loadProducts(), loadPromotions(), loadSales()]);
+  });
+
+  window.addEventListener('offline', () => {
+    DataService.isOffline = true;
+    updateConnectionUI();
+    showToast('🟠 Sin internet: Modo Offline Activado (las ventas se guardarán en el equipo)');
+  });
+
+  document.getElementById('btn-sync-pending').addEventListener('click', async () => {
+    const count = await DataService.syncPendingSales();
+    if (count === 0) {
+      showToast('⚠️ Aún no hay conexión con el servidor para sincronizar');
+    }
+  });
+
+  // Revisión automática de cola pendiente cada 20 segundos
+  setInterval(() => {
+    if (navigator.onLine && OfflineStore.getPendingQueue().length > 0) {
+      DataService.syncPendingSales();
+    }
+  }, 20000);
 
   // Login por PIN
   document.getElementById('btn-change-login-user').addEventListener('click', () => {
@@ -1696,11 +2450,11 @@ async function initApp() {
     });
   });
 
-  // Confirmar venta en Neon
+  // Confirmar venta (Online en Neon u Offline en equipo)
   document.getElementById('btn-confirm-sale').addEventListener('click', async () => {
     const btn = document.getElementById('btn-confirm-sale');
     btn.disabled = true;
-    btn.textContent = 'Guardando en Neon...';
+    btn.textContent = 'Procesando...';
     try {
       const totals = recalculateCartPromotions();
       const sale = await DataService.createSale({
@@ -1717,7 +2471,11 @@ async function initApp() {
       state.cart = [];
       renderCart();
       document.getElementById('modal-checkout').classList.add('hidden');
-      showToast(`✅ Venta #${sale.id} registrada por ${sale.cashier_name}`);
+      if (sale.pending_sync) {
+        showToast(`🟠 Venta #${sale.id} guardada en el equipo (se subirá al volver el internet)`);
+      } else {
+        showToast(`✅ Venta #${sale.id} registrada en Neon`);
+      }
       showSaleTicketModal(sale);
       await Promise.all([loadProducts(), loadSales()]);
     } catch (err) {
@@ -1841,20 +2599,12 @@ async function initApp() {
     }
   });
 
-  // Conectar a Neon
-  const dotEl = document.getElementById('db-status-dot');
-  const txtEl = document.getElementById('db-status-text');
-  try {
-    renderCart();
-    const info = await DataService.init();
-    await Promise.all([loadUsers(), loadProducts(), loadPromotions()]);
-    dotEl.className = 'status-dot connected';
-    txtEl.textContent = `Conectado: ${info.mode}`;
-  } catch (err) {
-    dotEl.className = 'status-dot error';
-    txtEl.textContent = 'Error de conexión a Neon';
-    console.error(err);
-  }
+  // Inicializar conexión o respaldo offline
+  renderCart();
+  await DataService.init();
+  await Promise.all([loadUsers(), loadProducts(), loadPromotions()]);
+  await DataService.syncPendingSales();
+  updateConnectionUI();
 }
 
 initApp();

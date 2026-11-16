@@ -117,7 +117,7 @@ export async function initDatabase() {
     );
   `);
 
-  // 4. Tabla de ventas (con cajero y descuentos de promociones)
+  // 4. Tabla de ventas (con cajero, descuentos de promociones y estado de devoluciones)
   await query(`
     CREATE TABLE IF NOT EXISTS sales (
       id SERIAL PRIMARY KEY,
@@ -131,6 +131,8 @@ export async function initDatabase() {
       note TEXT DEFAULT '',
       cashier_id INTEGER,
       cashier_name TEXT DEFAULT 'General',
+      status TEXT NOT NULL DEFAULT 'completada',
+      refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -140,6 +142,8 @@ export async function initDatabase() {
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS discount_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS promo_summary TEXT DEFAULT '';`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
 
   // 5. Tabla de conceptos por venta
   await query(`
@@ -149,6 +153,7 @@ export async function initDatabase() {
       product_id INTEGER,
       product_name TEXT NOT NULL,
       quantity INTEGER NOT NULL DEFAULT 1,
+      returned_qty INTEGER NOT NULL DEFAULT 0,
       unit_price NUMERIC(10, 2) NOT NULL,
       subtotal NUMERIC(10, 2) NOT NULL,
       is_free_reward BOOLEAN NOT NULL DEFAULT FALSE
@@ -156,6 +161,22 @@ export async function initDatabase() {
   `);
 
   await query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS is_free_reward BOOLEAN NOT NULL DEFAULT FALSE;`);
+  await query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS returned_qty INTEGER NOT NULL DEFAULT 0;`);
+
+  // 6. Tabla de historial de devoluciones (parciales y totales, con motivo, merma/stock y autorización)
+  await query(`
+    CREATE TABLE IF NOT EXISTS sale_returns (
+      id SERIAL PRIMARY KEY,
+      sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+      refund_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT '',
+      return_to_stock BOOLEAN NOT NULL DEFAULT TRUE,
+      items_summary TEXT NOT NULL DEFAULT '',
+      processed_by_name TEXT NOT NULL DEFAULT 'General',
+      authorized_by_name TEXT NOT NULL DEFAULT 'Administrador',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
   // Usuarios iniciales
   const existingUsers = await query('SELECT COUNT(*)::int AS total FROM users WHERE active = TRUE');

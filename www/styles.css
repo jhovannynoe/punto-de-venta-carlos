@@ -241,7 +241,19 @@ body {
 }
 .status-dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
 .status-dot.connecting { background: var(--accent); }
+.status-dot.offline { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .status-dot.error { background: var(--danger); }
+
+.btn-sync-badge {
+  background: rgba(245, 158, 11, 0.2);
+  border: 1px solid var(--accent);
+  color: #fcd34d;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
 
 .main-nav {
   display: flex;
@@ -802,6 +814,7 @@ body {
 .kpi-total .kpi-value { color: var(--primary); }
 .kpi-cash .kpi-value { color: var(--success); }
 .kpi-card .kpi-value { color: var(--accent); }
+.kpi-returns .kpi-value { color: #fca5a5; }
 
 .kpi-sub {
   font-size: 0.78rem;
@@ -845,6 +858,85 @@ body {
 .sale-badge.efectivo { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
 .sale-badge.tarjeta { background: rgba(59, 130, 246, 0.15); color: #93c5fd; }
 .sale-badge.transferencia { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
+.sale-badge.devuelta_parcial { background: rgba(245, 158, 11, 0.22); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.45); }
+.sale-badge.devuelta_total { background: rgba(239, 68, 68, 0.22); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.45); }
+
+.sale-returns-box {
+  margin-top: 0.45rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid var(--danger);
+  font-size: 0.78rem;
+  color: #fecaca;
+}
+
+.modal-card-lg {
+  max-width: 640px;
+}
+
+.return-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.return-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 0.25rem;
+}
+
+.return-item-row {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.85rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.return-item-row.active-return {
+  border-color: var(--accent);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.return-stock-select {
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.quick-reason-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.quick-reason-chips .chip-btn {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.55rem;
+}
+
+.return-auth-box {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+}
 
 .cashier-tag {
   font-size: 0.75rem;
