@@ -206,14 +206,19 @@ const DataService = {
     }
 
     try {
-      const res = await fetch('/api/health');
+      // Despertar Render silenciosamente en segundo plano pero NO esperar más de 1.2s
+      fetch('/api/health').catch(() => {});
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1200);
+      const res = await fetch('/api/health', { signal: controller.signal });
+      clearTimeout(timer);
       if (res.ok) {
         this.useDirectNeon = false;
         this.isOffline = false;
         return { mode: 'Neon Cloud (Servidor Web)', offline: false };
       }
     } catch {
-      // Intentar directo a Neon o pasar a modo offline
+      // Si Render está despertando (>1.2s), conectar directo a Neon Cloud al instante sin esperar a Render
     }
 
     try {
@@ -2585,6 +2590,76 @@ async function initApp() {
   document.getElementById('btn-print-corte').addEventListener('click', showDailyCorteModal);
   document.getElementById('btn-print-receipt').addEventListener('click', () => window.print());
 
+  // Eventos del Modal de Devoluciones (Puntos 1 al 4)
+  document.getElementById('btn-return-select-all').addEventListener('click', () => {
+    if (!activeReturnDraft) return;
+    for (const item of activeReturnDraft.items) {
+      item.return_qty = item.available_qty;
+    }
+    renderReturnModalItems();
+  });
+
+  document.querySelectorAll('.btn-reason-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.getElementById('return-reason').value = btn.dataset.reason;
+      document.getElementById('return-reason').focus();
+    });
+  });
+
+  document.getElementById('form-return').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!activeReturnDraft || !state.currentUser) return;
+
+    const selectedItems = activeReturnDraft.items.filter((it) => it.return_qty > 0);
+    if (selectedItems.length === 0) {
+      showToast('⚠️ Selecciona al menos 1 artículo/pieza para devolver');
+      return;
+    }
+
+    const reason = document.getElementById('return-reason').value.trim();
+    if (!reason) {
+      showToast('⚠️ Escribe o selecciona el motivo de la devolución');
+      return;
+    }
+
+    const refundAmount = Number(document.getElementById('return-refund-amount').value || 0);
+    const isAdminSession = state.currentUser.role === 'admin';
+    const adminPin = document.getElementById('return-admin-pin').value.trim();
+
+    if (!isAdminSession && !adminPin) {
+      showToast('🔒 Ingresa el PIN de un Administrador para autorizar la devolución');
+      document.getElementById('return-admin-pin').focus();
+      return;
+    }
+
+    const btn = document.getElementById('btn-confirm-return');
+    btn.disabled = true;
+    btn.textContent = 'Procesando devolución...';
+
+    try {
+      const res = await DataService.processSaleReturn(activeReturnDraft.sale.id, {
+        items: selectedItems,
+        refund_amount: refundAmount,
+        reason,
+        processed_by_name: state.currentUser.name,
+        authorized_by_name: isAdminSession ? state.currentUser.name : '',
+        is_admin_session: isAdminSession,
+        admin_pin: adminPin,
+      });
+
+      document.getElementById('modal-return').classList.add('hidden');
+      await Promise.all([loadProducts(), loadSales()]);
+      showToast(
+        `↩️ Devolución aplicada (-${formatMoney(refundAmount)}) • Autorizó: ${res.authorized_by_name || 'Admin'}`
+      );
+    } catch (err) {
+      showToast(`❌ ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '↩️ Confirmar Devolución';
+    }
+  });
+
   // Atajos de teclado en PC
   window.addEventListener('keydown', (e) => {
     if (!state.currentUser) return;
@@ -2599,8 +2674,21 @@ async function initApp() {
     }
   });
 
-  // Inicializar conexión o respaldo offline
+  // 1. Pintar inmediatamente desde caché local (0ms de espera, sin esperar a que Render despierte)
+  state.users = OfflineStore.get(OfflineStore.KEYS.USERS, [
+    { id: 1, name: 'Administrador', role: 'admin', pin: '1234' },
+    { id: 2, name: 'Cajero 1', role: 'cajero', pin: '1111' },
+    { id: 3, name: 'Cajero 2', role: 'cajero', pin: '2222' },
+  ]);
+  state.products = OfflineStore.get(OfflineStore.KEYS.PRODUCTS, []);
+  state.promotions = OfflineStore.get(OfflineStore.KEYS.PROMOS, []);
+  renderLoginScreen();
+  renderCategories();
+  renderPosProducts();
+  renderActivePromosBanner();
   renderCart();
+
+  // 2. Conectar en segundo plano (si Render tarda >1.2s en despertar, usa Neon Cloud directo al instante)
   await DataService.init();
   await Promise.all([loadUsers(), loadProducts(), loadPromotions()]);
   await DataService.syncPendingSales();

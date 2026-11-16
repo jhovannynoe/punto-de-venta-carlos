@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pos-carlos-offline-v2';
+const CACHE_NAME = 'pos-carlos-instant-v3';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -33,25 +33,40 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
-  // Para las llamadas a la API o a Neon, intentar red primero
+
+  // No interceptar llamadas a la API o a Neon en el Service Worker
   if (url.pathname.startsWith('/api/') || url.hostname.includes('neon.tech')) {
     return;
   }
 
-  // Para archivos de la aplicación (HTML, CSS, JS, Iconos): Network-First con Fallback inmediato a Caché Offline
+  // ESTRATEGIA INSTANTÁNEA (Stale-While-Revalidate):
+  // Devuelve inmediatamente la app desde la caché local (0ms de espera, sin pantalla de carga de Render)
+  // y actualiza silenciosamente en segundo plano cuando Render despierte.
   event.respondWith(
-    fetch(req)
-      .then((networkRes) => {
-        if (networkRes && networkRes.status === 200) {
-          const clone = networkRes.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
-        }
-        return networkRes;
-      })
-      .catch(async () => {
-        const cached = await caches.match(req);
-        if (cached) return cached;
-        return caches.match('/index.html');
-      })
+    caches.open(CACHE_NAME).then(async (cache) => {
+      const cachedResponse =
+        (await cache.match(req)) ||
+        (req.mode === 'navigate' ? await cache.match('/index.html') : null);
+
+      const networkFetch = fetch(req)
+        .then((networkRes) => {
+          // Solo actualizar caché si es una respuesta válida de nuestra app (no página de espera 502/503 de Render)
+          if (networkRes && networkRes.status === 200 && networkRes.type === 'basic') {
+            cache.put(req, networkRes.clone());
+          }
+          return networkRes;
+        })
+        .catch(() => null);
+
+      // Si ya tenemos la app en caché, mostrarla AL INSTANTE sin esperar a Render
+      if (cachedResponse) {
+        event.waitUntil(networkFetch);
+        return cachedResponse;
+      }
+
+      // Primera visita sin caché
+      const netRes = await networkFetch;
+      return netRes || (await cache.match('/index.html'));
+    })
   );
 });
