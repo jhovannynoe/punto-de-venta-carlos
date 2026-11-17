@@ -269,10 +269,12 @@ async function handleApi(req, res, urlObj) {
     // SALES
     if (pathname === '/api/sales' && method === 'GET') {
       const dateParam = urlObj.searchParams.get('date');
+      const startDateParam = urlObj.searchParams.get('start_date') || dateParam;
+      const endDateParam = urlObj.searchParams.get('end_date') || dateParam;
       const cashierIdParam = urlObj.searchParams.get('cashier_id');
 
       let salesRows;
-      if (dateParam && cashierIdParam && cashierIdParam !== 'all') {
+      if (startDateParam && endDateParam && cashierIdParam && cashierIdParam !== 'all') {
         salesRows = await query(
           `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
@@ -280,12 +282,13 @@ async function handleApi(req, res, urlObj) {
                   note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
                   COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
-           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
-             AND cashier_id = $2
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+             AND cashier_id = $3
            ORDER BY created_at DESC`,
-          [dateParam, Number(cashierIdParam)]
+          [startDateParam, endDateParam, Number(cashierIdParam)]
         );
-      } else if (dateParam) {
+      } else if (startDateParam && endDateParam) {
         salesRows = await query(
           `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
@@ -293,9 +296,10 @@ async function handleApi(req, res, urlObj) {
                   note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
                   COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
-           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
            ORDER BY created_at DESC`,
-          [dateParam]
+          [startDateParam, endDateParam]
         );
       } else {
         salesRows = await query(
@@ -306,7 +310,7 @@ async function handleApi(req, res, urlObj) {
                   COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
            FROM sales
            ORDER BY created_at DESC
-           LIMIT 100`
+           LIMIT 500`
         );
       }
 

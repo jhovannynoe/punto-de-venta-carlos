@@ -185,11 +185,37 @@
             <select id="history-cashier-filter" class="input admin-only hidden">
               <option value="all">👥 Todos los Cajeros</option>
             </select>
+
+            <select id="history-period-select" class="input">
+              <option value="day">📅 Por Día (Corte Diario)</option>
+              <option value="this_week">📆 Esta Semana (Lun - Dom)</option>
+              <option value="last_week">📆 Semana Pasada</option>
+              <option value="last_4_weeks">📆 Últimas 4 Semanas</option>
+              <option value="this_month">🗓️ Este Mes</option>
+              <option value="last_month">🗓️ Mes Pasado</option>
+              <option value="pick_month">🗓️ Elegir Mes Específico...</option>
+              <option value="last_3_months">📊 Últimos 3 Meses</option>
+              <option value="last_6_months">📊 Últimos 6 Meses</option>
+              <option value="last_12_months">📊 Últimos 12 Meses (1 Año)</option>
+              <option value="last_24_months">📈 Últimos 24 Meses (2 Años)</option>
+              <option value="custom_range">🔍 Rango de Fechas (Desde / Hasta)</option>
+            </select>
+
             <input type="date" id="history-date" class="input" />
+            <input type="month" id="history-month-picker" class="input hidden" />
+
+            <div id="history-custom-range-box" class="history-custom-range hidden">
+              <input type="date" id="history-start-date" class="input" title="Fecha inicial" />
+              <span style="color:var(--text-muted); font-size:0.85rem;">al</span>
+              <input type="date" id="history-end-date" class="input" title="Fecha final" />
+            </div>
+
             <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
-            <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Corte</button>
+            <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Corte / Reporte</button>
           </div>
         </div>
+
+        <div id="history-period-banner" class="period-info-banner"></div>
 
         <div class="kpi-grid">
           <div class="kpi-card kpi-total">
@@ -227,6 +253,30 @@
               </tr>
             </thead>
             <tbody id="cashier-breakdown-tbody"></tbody>
+          </table>
+        </div>
+
+        <div id="period-summary-box" class="table-container hidden" style="margin-bottom: 1.5rem;">
+          <div class="period-summary-header">
+            <strong id="period-summary-title">📈 Desglose de Ventas por Periodo</strong>
+            <div class="period-group-btns">
+              <button type="button" class="chip-btn period-group-btn" data-group="day">Por Día</button>
+              <button type="button" class="chip-btn period-group-btn" data-group="week">Por Semana</button>
+              <button type="button" class="chip-btn period-group-btn active" data-group="month">Por Mes</button>
+            </div>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th id="period-col-header">Periodo</th>
+                <th>Ventas Realizadas</th>
+                <th>💵 Efectivo Neto</th>
+                <th>💳 Tarjeta / Transf.</th>
+                <th>↩️ Devoluciones</th>
+                <th>Total Neto</th>
+              </tr>
+            </thead>
+            <tbody id="period-summary-tbody"></tbody>
           </table>
         </div>
 

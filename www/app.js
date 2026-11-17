@@ -376,8 +376,8 @@ const DataService = {
     const productType = ['producto', 'servicio', 'servicio_especial'].includes(prod.product_type)
       ? prod.product_type
       : prod.is_service
-      ? 'servicio'
-      : 'producto';
+        ? 'servicio'
+        : 'producto';
     const isService = productType !== 'producto';
     const stock = isService || prod.stock === null || prod.stock === '' ? null : Number(prod.stock);
     const freeAfterSales =
@@ -645,7 +645,10 @@ const DataService = {
     return syncedCount;
   },
 
-  async getSales(dateStr, cashierId = 'all') {
+  async getSales(startDateStr, endDateStr, cashierId = 'all') {
+    const startParam = startDateStr || getTodayLocalISO();
+    const endParam = endDateStr || startParam;
+
     const pendingQueue = OfflineStore.getPendingQueue().filter((s) => {
       if (cashierId && cashierId !== 'all' && Number(s.cashier_id) !== Number(cashierId)) return false;
       return true;
@@ -655,14 +658,15 @@ const DataService = {
       let cloudSales = [];
       if (!this.useDirectNeon) {
         const params = new URLSearchParams();
-        if (dateStr) params.set('date', dateStr);
+        if (startParam) params.set('start_date', startParam);
+        if (endParam) params.set('end_date', endParam);
         if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
         const res = await fetch(`/api/sales?${params.toString()}`);
         if (!res.ok) throw new Error('Offline');
         cloudSales = await res.json();
       } else {
         let salesRows;
-        if (dateStr && cashierId && cashierId !== 'all') {
+        if (startParam && endParam && cashierId && cashierId !== 'all') {
           salesRows = await neonQuery(
             `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                     COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
@@ -670,12 +674,13 @@ const DataService = {
                     note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
                     COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
              FROM sales
-             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
-               AND cashier_id = $2
+             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+               AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+               AND cashier_id = $3
              ORDER BY created_at DESC`,
-            [dateStr, Number(cashierId)]
+            [startParam, endParam, Number(cashierId)]
           );
-        } else if (dateStr) {
+        } else if (startParam && endParam) {
           salesRows = await neonQuery(
             `SELECT id, COALESCE(subtotal, total)::float AS subtotal, COALESCE(discount_total, 0)::float AS discount_total,
                     COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
@@ -683,9 +688,10 @@ const DataService = {
                     note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
                     COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
              FROM sales
-             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date = $1::date
+             WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+               AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
              ORDER BY created_at DESC`,
-            [dateStr]
+            [startParam, endParam]
           );
         } else {
           salesRows = await neonQuery(
@@ -696,7 +702,7 @@ const DataService = {
                     COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
              FROM sales
              ORDER BY created_at DESC
-             LIMIT 100`
+             LIMIT 500`
           );
         }
         if (salesRows.length > 0) {
@@ -980,6 +986,11 @@ const state = {
   catalogFilter: '',
   paymentMethod: 'efectivo',
   selectedDate: getTodayLocalISO(),
+  historyPeriod: 'day',
+  selectedMonth: getTodayLocalISO().slice(0, 7),
+  customStartDate: getTodayLocalISO(),
+  customEndDate: getTodayLocalISO(),
+  periodGroupBy: 'month',
   selectedCashierFilter: 'all',
 };
 
@@ -987,6 +998,139 @@ function getTodayLocalISO() {
   const now = new Date();
   const offsetMs = now.getTimezoneOffset() * 60000;
   return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+function toLocalISODate(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getActiveHistoryDateRange() {
+  const todayStr = getTodayLocalISO();
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const today = new Date(ty, tm - 1, td);
+  const mode = state.historyPeriod || 'day';
+
+  if (mode === 'day') {
+    const d = state.selectedDate || todayStr;
+    return { startDate: d, endDate: d, label: `Día: ${d}`, isMultiDay: false };
+  }
+
+  if (mode === 'this_week') {
+    const dayOfWeek = today.getDay(); // 0=Dom, 1=Lun...
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + diffToMonday);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    const s = toLocalISODate(monday);
+    const e = toLocalISODate(sunday);
+    return { startDate: s, endDate: e, label: `Esta Semana (${s} al ${e})`, isMultiDay: true };
+  }
+
+  if (mode === 'last_week') {
+    const dayOfWeek = today.getDay();
+    const diffToLastMonday = (dayOfWeek === 0 ? -6 : 1 - dayOfWeek) - 7;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + diffToLastMonday);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    const s = toLocalISODate(monday);
+    const e = toLocalISODate(sunday);
+    return { startDate: s, endDate: e, label: `Semana Pasada (${s} al ${e})`, isMultiDay: true };
+  }
+
+  if (mode === 'last_4_weeks') {
+    const start = new Date(today);
+    start.setDate(today.getDate() - 27);
+    const s = toLocalISODate(start);
+    return { startDate: s, endDate: todayStr, label: `Últimas 4 Semanas (${s} al ${todayStr})`, isMultiDay: true };
+  }
+
+  if (mode === 'this_month') {
+    const firstDay = new Date(ty, tm - 1, 1);
+    const lastDay = new Date(ty, tm, 0);
+    const s = toLocalISODate(firstDay);
+    const e = toLocalISODate(lastDay);
+    return { startDate: s, endDate: e, label: `Este Mes (${s} al ${e})`, isMultiDay: true };
+  }
+
+  if (mode === 'last_month') {
+    const firstDay = new Date(ty, tm - 2, 1);
+    const lastDay = new Date(ty, tm - 1, 0);
+    const s = toLocalISODate(firstDay);
+    const e = toLocalISODate(lastDay);
+    return { startDate: s, endDate: e, label: `Mes Pasado (${s} al ${e})`, isMultiDay: true };
+  }
+
+  if (mode === 'pick_month') {
+    const ym = state.selectedMonth || todayStr.slice(0, 7);
+    const [py, pm] = ym.split('-').map(Number);
+    const firstDay = new Date(py, pm - 1, 1);
+    const lastDay = new Date(py, pm, 0);
+    const s = toLocalISODate(firstDay);
+    const e = toLocalISODate(lastDay);
+    return { startDate: s, endDate: e, label: `Mes ${ym} (${s} al ${e})`, isMultiDay: true };
+  }
+
+  const monthsMatch = mode.match(/^last_(\d+)_months$/);
+  if (monthsMatch) {
+    const numMonths = Number(monthsMatch[1]);
+    const start = new Date(ty, tm - numMonths, 1);
+    const s = toLocalISODate(start);
+    return {
+      startDate: s,
+      endDate: todayStr,
+      label: `Últimos ${numMonths} Meses (${s} al ${todayStr})`,
+      isMultiDay: true,
+    };
+  }
+
+  if (mode === 'custom_range') {
+    const s = state.customStartDate || todayStr;
+    const e = state.customEndDate || todayStr;
+    const start = s <= e ? s : e;
+    const end = s <= e ? e : s;
+    return {
+      startDate: start,
+      endDate: end,
+      label: `Rango Personalizado (${start} al ${end})`,
+      isMultiDay: start !== end,
+    };
+  }
+
+  return { startDate: todayStr, endDate: todayStr, label: `Día: ${todayStr}`, isMultiDay: false };
+}
+
+function getSalePeriodBucket(createdAtISO, groupBy = 'month') {
+  const d = new Date(createdAtISO);
+  if (groupBy === 'day') {
+    const key = toLocalISODate(d);
+    const label = d.toLocaleDateString('es-MX', {
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    });
+    return { key, label: `📅 ${label}` };
+  }
+  if (groupBy === 'week') {
+    const dayOfWeek = d.getDay();
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToMonday);
+    const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+    const key = toLocalISODate(monday);
+    return { key, label: `📆 Semana ${toLocalISODate(monday)} al ${toLocalISODate(sunday)}` };
+  }
+  // Por mes (default)
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const key = `${y}-${m}`;
+  const monthName = d.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+  const capMonth = monthName.charAt(0).toUpperCase() + monthName.slice(1);
+  return { key, label: `🗓️ ${capMonth}` };
 }
 
 function formatMoney(num) {
@@ -1132,9 +1276,8 @@ function renderLoginScreen() {
       const user = state.users.find((u) => Number(u.id) === Number(card.dataset.id));
       if (!user) return;
       state.selectedLoginUser = user;
-      document.getElementById('login-selected-name').textContent = `${
-        user.role === 'admin' ? '🛡️' : '🧑‍💼'
-      } ${user.name}`;
+      document.getElementById('login-selected-name').textContent = `${user.role === 'admin' ? '🛡️' : '🧑‍💼'
+        } ${user.name}`;
       document.getElementById('login-pin-input').value = '';
       grid.classList.add('hidden');
       pinForm.classList.remove('hidden');
@@ -1690,9 +1833,29 @@ function openCashierModal(user = null) {
 // ==========================================
 let activeReturnDraft = null;
 
+function syncHistoryPeriodInputs() {
+  const mode = state.historyPeriod || 'day';
+  const dateInput = document.getElementById('history-date');
+  const monthInput = document.getElementById('history-month-picker');
+  const customBox = document.getElementById('history-custom-range-box');
+
+  if (dateInput) dateInput.classList.toggle('hidden', mode !== 'day');
+  if (monthInput) monthInput.classList.toggle('hidden', mode !== 'pick_month');
+  if (customBox) customBox.classList.toggle('hidden', mode !== 'custom_range');
+}
+
 function renderSalesHistory() {
   const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const listEl = document.getElementById('sales-history-list');
+  const rangeInfo = getActiveHistoryDateRange();
+
+  const bannerEl = document.getElementById('history-period-banner');
+  if (bannerEl) {
+    bannerEl.innerHTML = `
+      <span>📅 <strong>Periodo consultado:</strong> ${escapeHtml(rangeInfo.label)}</span>
+      <span>Operaciones encontradas: <strong>${state.sales.length}</strong></span>
+    `;
+  }
 
   const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
   const totalRefunded = state.sales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
@@ -1721,7 +1884,64 @@ function renderSalesHistory() {
   const kpiRetTotalEl = document.getElementById('kpi-returns-total');
   const kpiRetCountEl = document.getElementById('kpi-returns-count');
   if (kpiRetTotalEl) kpiRetTotalEl.textContent = `-${formatMoney(totalRefunded)}`;
-  if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) registrada(s)`;
+  if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) en el periodo`;
+
+  // Tabla de Resumen Agrupado por Periodo (Por Mes / Por Semana / Por Día) cuando es vista multi-día
+  const periodSummaryBox = document.getElementById('period-summary-box');
+  if (periodSummaryBox) {
+    periodSummaryBox.classList.toggle('hidden', !rangeInfo.isMultiDay);
+    if (rangeInfo.isMultiDay) {
+      const groupBy = state.periodGroupBy || 'month';
+      document.querySelectorAll('.period-group-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.group === groupBy);
+      });
+      const colHeader = document.getElementById('period-col-header');
+      if (colHeader) {
+        colHeader.textContent =
+          groupBy === 'day' ? 'Día' : groupBy === 'week' ? 'Semana' : 'Mes / Año';
+      }
+
+      const byBucket = {};
+      for (const s of state.sales) {
+        const b = getSalePeriodBucket(s.created_at, groupBy);
+        if (!byBucket[b.key]) {
+          byBucket[b.key] = { label: b.label, count: 0, cash: 0, digital: 0, refunded: 0, net: 0 };
+        }
+        const saleRefund = Number(s.refunded_total || 0);
+        const saleNet = Math.max(0, Number(s.total) - saleRefund);
+        byBucket[b.key].count += 1;
+        byBucket[b.key].refunded += saleRefund;
+        byBucket[b.key].net += saleNet;
+        if (s.payment_method === 'efectivo') {
+          byBucket[b.key].cash += saleNet;
+        } else {
+          byBucket[b.key].digital += saleNet;
+        }
+      }
+
+      const bucketKeys = Object.keys(byBucket).sort((a, b) => b.localeCompare(a));
+      const periodTbody = document.getElementById('period-summary-tbody');
+      if (bucketKeys.length === 0) {
+        periodTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas registradas en este periodo</td></tr>`;
+      } else {
+        periodTbody.innerHTML = bucketKeys
+          .map((k) => {
+            const row = byBucket[k];
+            return `
+              <tr>
+                <td><strong>${escapeHtml(row.label)}</strong></td>
+                <td>${row.count} venta(s)</td>
+                <td><strong>${formatMoney(row.cash)}</strong></td>
+                <td>${formatMoney(row.digital)}</td>
+                <td style="color:#fca5a5;">${row.refunded > 0 ? `-${formatMoney(row.refunded)}` : '$0.00'}</td>
+                <td><strong style="color:var(--success)">${formatMoney(row.net)}</strong></td>
+              </tr>
+            `;
+          })
+          .join('');
+      }
+    }
+  }
 
   if (isAdmin) {
     const byCashier = {};
@@ -1744,7 +1964,7 @@ function renderSalesHistory() {
     const breakdownTbody = document.getElementById('cashier-breakdown-tbody');
     const names = Object.keys(byCashier);
     if (names.length === 0) {
-      breakdownTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas en esta fecha</td></tr>`;
+      breakdownTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas en este periodo</td></tr>`;
     } else {
       breakdownTbody.innerHTML = names
         .map(
@@ -1764,16 +1984,18 @@ function renderSalesHistory() {
   }
 
   if (state.sales.length === 0) {
-    listEl.innerHTML = `<div class="cart-empty">No hay ventas registradas para mostrar (${state.selectedDate}).</div>`;
+    listEl.innerHTML = `<div class="cart-empty">No hay ventas registradas para mostrar en ${escapeHtml(rangeInfo.label)}.</div>`;
     return;
   }
 
   listEl.innerHTML = state.sales
     .map((s) => {
-      const timeStr = new Date(s.created_at).toLocaleTimeString('es-MX', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      const dObj = new Date(s.created_at);
+      const timeStr = rangeInfo.isMultiDay
+        ? dObj.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' }) +
+          ' ' +
+          dObj.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+        : dObj.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
       const itemsSummary = (s.items || [])
         .map((it) => {
           const retQty = Number(it.returned_qty || 0);
@@ -1801,20 +2023,20 @@ function renderSalesHistory() {
         s.returns && s.returns.length > 0
           ? `<div class="sale-returns-box">
                ${s.returns
-                 .map((ret) => {
-                   const rTime = new Date(ret.created_at).toLocaleTimeString('es-MX', {
-                     hour: '2-digit',
-                     minute: '2-digit',
-                   });
-                   return `<div>
+            .map((ret) => {
+              const rTime = new Date(ret.created_at).toLocaleTimeString('es-MX', {
+                hour: '2-digit',
+                minute: '2-digit',
+              });
+              return `<div>
                      <strong>↩️ [${rTime}] Reembolso -${formatMoney(ret.refund_amount)}:</strong>
                      ${escapeHtml(ret.items_summary)} •
                      <em>Motivo: ${escapeHtml(ret.reason)}</em> •
                      🛡️ Autorizó: <strong>${escapeHtml(ret.authorized_by_name)}</strong>
                      (Turno: ${escapeHtml(ret.processed_by_name)})
                    </div>`;
-                 })
-                 .join('')}
+            })
+            .join('')}
              </div>`
           : '';
 
@@ -1833,41 +2055,37 @@ function renderSalesHistory() {
             </div>
             <div class="sale-items-summary">${escapeHtml(itemsSummary || 'Venta general')}</div>
             <div class="sale-meta">
-              ${
-                Number(s.discount_total) > 0
-                  ? `<span style="color:var(--success); font-weight:700;">🎁 ${escapeHtml(
-                      s.promo_summary || 'Descuento promo'
-                    )} • </span>`
-                  : ''
-              }
-              ${
-                s.payment_method === 'efectivo'
-                  ? `Recibido: ${formatMoney(s.amount_received)} | Cambio: ${formatMoney(s.change_given)}`
-                  : `Cobro con ${s.payment_method}`
-              }
+              ${Number(s.discount_total) > 0
+          ? `<span style="color:var(--success); font-weight:700;">🎁 ${escapeHtml(
+            s.promo_summary || 'Descuento promo'
+          )} • </span>`
+          : ''
+        }
+              ${s.payment_method === 'efectivo'
+          ? `Recibido: ${formatMoney(s.amount_received)} | Cambio: ${formatMoney(s.change_given)}`
+          : `Cobro con ${s.payment_method}`
+        }
               ${s.note ? ` • Nota: ${escapeHtml(s.note)}` : ''}
             </div>
             ${returnsHistoryHtml}
           </div>
           <div class="sale-card-right">
             <div style="text-align:right;">
-              ${
-                refundedAmt > 0
-                  ? `<div style="font-size:0.78rem; color:var(--text-muted); text-decoration:line-through;">Bruto: ${formatMoney(
-                      s.total
-                    )}</div>`
-                  : ''
-              }
+              ${refundedAmt > 0
+          ? `<div style="font-size:0.78rem; color:var(--text-muted); text-decoration:line-through;">Bruto: ${formatMoney(
+            s.total
+          )}</div>`
+          : ''
+        }
               <span class="sale-total-amount" style="${status === 'devuelta_total' ? 'color:#fca5a5;' : ''}">
                 ${formatMoney(netSaleAmt)}
               </span>
             </div>
             <button class="btn btn-secondary btn-sm btn-view-ticket" data-id="${s.id}">🧾 Ticket</button>
-            ${
-              canReturn
-                ? `<button class="btn btn-danger btn-sm btn-open-return" data-id="${s.id}">↩️ Devolver</button>`
-                : ''
-            }
+            ${canReturn
+          ? `<button class="btn btn-danger btn-sm btn-open-return" data-id="${s.id}">↩️ Devolver</button>`
+          : ''
+        }
           </div>
         </div>
       `;
@@ -1937,9 +2155,8 @@ function openReturnModal(sale) {
 
   document.getElementById('return-sale-id').value = sale.id;
   document.getElementById('modal-return-title').textContent = `↩️ Devolución de Venta Folio #${sale.id}`;
-  document.getElementById('modal-return-subtitle').textContent = `Cobrada por ${
-    sale.cashier_name || 'General'
-  } (${sale.payment_method.toUpperCase()}) • Saldo disponible a devolver: ${formatMoney(remainingSaleBalance)}`;
+  document.getElementById('modal-return-subtitle').textContent = `Cobrada por ${sale.cashier_name || 'General'
+    } (${sale.payment_method.toUpperCase()}) • Saldo disponible a devolver: ${formatMoney(remainingSaleBalance)}`;
 
   document.getElementById('return-reason').value = '';
   document.getElementById('return-admin-pin').value = '';
@@ -2040,9 +2257,8 @@ function showSaleTicketModal(sale) {
       const retQty = Number(it.returned_qty || 0);
       return `
       <div style="display:flex; justify-content:space-between; margin: 4px 0;">
-        <span>${it.quantity} x ${escapeHtml(it.product_name)}${it.is_free_reward ? ' (🎁 PROMO GRATIS)' : ''}${
-        retQty > 0 ? ` (↩️ ${retQty} dev.)` : ''
-      }</span>
+        <span>${it.quantity} x ${escapeHtml(it.product_name)}${it.is_free_reward ? ' (🎁 PROMO GRATIS)' : ''}${retQty > 0 ? ` (↩️ ${retQty} dev.)` : ''
+        }</span>
         <strong>${formatMoney(it.subtotal)}</strong>
       </div>`;
     })
@@ -2071,13 +2287,13 @@ function showSaleTicketModal(sale) {
              <strong>-${formatMoney(refundedAmt)}</strong>
            </div>
            ${(sale.returns || [])
-             .map(
-               (r) =>
-                 `<div style="font-size:0.75rem; margin-top:2px;">• ${escapeHtml(r.items_summary)} (${escapeHtml(
-                   r.reason
-                 )}) - Autorizó: ${escapeHtml(r.authorized_by_name)}</div>`
-             )
-             .join('')}
+        .map(
+          (r) =>
+            `<div style="font-size:0.75rem; margin-top:2px;">• ${escapeHtml(r.items_summary)} (${escapeHtml(
+              r.reason
+            )}) - Autorizó: ${escapeHtml(r.authorized_by_name)}</div>`
+        )
+        .join('')}
            <div style="display:flex; justify-content:space-between; font-weight:bold; margin-top:4px;">
              <span>TOTAL NETO:</span>
              <span>${formatMoney(netTotal)}</span>
@@ -2089,13 +2305,12 @@ function showSaleTicketModal(sale) {
   document.getElementById('receipt-content').innerHTML = `
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <h3 style="margin:0;">PUNTO DE VENTA CARLOS</h3>
-      <div>Folio #${sale.id} ${
-    sale.status === 'devuelta_total'
+      <div>Folio #${sale.id} ${sale.status === 'devuelta_total'
       ? '(DEVUELTA TOTAL)'
       : sale.status === 'devuelta_parcial'
-      ? '(DEVUELTA PARCIAL)'
-      : ''
-  }</div>
+        ? '(DEVUELTA PARCIAL)'
+        : ''
+    }</div>
       <div>Atendió: <strong>${escapeHtml(sale.cashier_name || 'General')}</strong></div>
       <div style="font-size:0.8rem;">${dateStr}</div>
     </div>
@@ -2110,12 +2325,11 @@ function showSaleTicketModal(sale) {
     ${returnsTicketHtml}
     <div style="margin-top:6px; font-size:0.85rem;">
       <div>Método de pago: <strong>${sale.payment_method.toUpperCase()}</strong></div>
-      ${
-        sale.payment_method === 'efectivo'
-          ? `<div>Recibido: ${formatMoney(sale.amount_received)}</div>
+      ${sale.payment_method === 'efectivo'
+      ? `<div>Recibido: ${formatMoney(sale.amount_received)}</div>
              <div>Cambio: ${formatMoney(sale.change_given)}</div>`
-          : ''
-      }
+      : ''
+    }
       ${sale.note ? `<div>Nota: ${escapeHtml(sale.note)}</div>` : ''}
     </div>
     <div style="text-align:center; margin-top:12px; font-size:0.8rem;">
@@ -2126,6 +2340,7 @@ function showSaleTicketModal(sale) {
 }
 
 function showDailyCorteModal() {
+  const rangeInfo = getActiveHistoryDateRange();
   const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
   const totalRefunded = state.sales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
   const netSales = Math.max(0, grossSales - totalRefunded);
@@ -2154,6 +2369,36 @@ function showDailyCorteModal() {
     ? 'Todos los Cajeros (General)'
     : `Cajero filtrado`;
 
+  let periodBreakdownPrintHtml = '';
+  if (rangeInfo.isMultiDay && state.sales.length > 0) {
+    const groupBy = state.periodGroupBy || 'month';
+    const byBucket = {};
+    for (const s of state.sales) {
+      const b = getSalePeriodBucket(s.created_at, groupBy);
+      if (!byBucket[b.key]) {
+        byBucket[b.key] = { label: b.label, count: 0, net: 0 };
+      }
+      const saleNet = Math.max(0, Number(s.total) - Number(s.refunded_total || 0));
+      byBucket[b.key].count += 1;
+      byBucket[b.key].net += saleNet;
+    }
+    const keys = Object.keys(byBucket).sort((a, b) => b.localeCompare(a));
+    periodBreakdownPrintHtml = `
+      <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px; font-size:0.82rem;">
+        <strong>DESGLOSE POR PERIODO:</strong>
+        ${keys
+          .map(
+            (k) => `
+          <div style="display:flex; justify-content:space-between; margin:3px 0;">
+            <span>${escapeHtml(byBucket[k].label)} (${byBucket[k].count} vta):</span>
+            <strong>${formatMoney(byBucket[k].net)}</strong>
+          </div>`
+          )
+          .join('')}
+      </div>
+    `;
+  }
+
   const returnsDetailHtml =
     allReturns.length > 0
       ? `<div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px; font-size:0.8rem;">
@@ -2172,11 +2417,11 @@ function showDailyCorteModal() {
          </div>`
       : '';
 
-  document.getElementById('receipt-title').textContent = `Corte de Caja (${state.selectedDate})`;
+  document.getElementById('receipt-title').textContent = `Reporte / Corte (${rangeInfo.label})`;
   document.getElementById('receipt-content').innerHTML = `
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
-      <h3 style="margin:0;">CORTE DE CAJA</h3>
-      <div>Fecha: <strong>${state.selectedDate}</strong></div>
+      <h3 style="margin:0;">REPORTE Y CORTE DE VENTAS</h3>
+      <div>Periodo: <strong>${escapeHtml(rangeInfo.label)}</strong></div>
       <div>Alcance: <strong>${escapeHtml(scopeLabel)}</strong></div>
       <div>Operaciones: <strong>${state.sales.length}</strong></div>
     </div>
@@ -2204,9 +2449,10 @@ function showDailyCorteModal() {
         <strong>${formatMoney(transferSales)}</strong>
       </div>
     </div>
+    ${periodBreakdownPrintHtml}
     ${returnsDetailHtml}
     <div style="display:flex; justify-content:space-between; font-size:1.15rem; font-weight:bold;">
-      <span>TOTAL NETO EN CAJA:</span>
+      <span>TOTAL NETO:</span>
       <span>${formatMoney(netSales)}</span>
     </div>
   `;
@@ -2325,14 +2571,23 @@ async function loadSales() {
   if (!state.currentUser) return;
   const cashierFilter =
     state.currentUser.role === 'admin' ? state.selectedCashierFilter : String(state.currentUser.id);
-  state.sales = await DataService.getSales(state.selectedDate, cashierFilter);
+  const rangeInfo = getActiveHistoryDateRange();
+  state.sales = await DataService.getSales(rangeInfo.startDate, rangeInfo.endDate, cashierFilter);
   renderSalesHistory();
 }
 
 // Inicialización general y eventos
 async function initApp() {
   const dateInput = document.getElementById('history-date');
+  const monthInput = document.getElementById('history-month-picker');
+  const startDateInput = document.getElementById('history-start-date');
+  const endDateInput = document.getElementById('history-end-date');
+
   dateInput.value = state.selectedDate;
+  if (monthInput) monthInput.value = state.selectedMonth;
+  if (startDateInput) startDateInput.value = state.customStartDate;
+  if (endDateInput) endDateInput.value = state.customEndDate;
+  syncHistoryPeriodInputs();
 
   // Eventos de Red (Auto-Sync cuando regresa el internet)
   window.addEventListener('online', async () => {
@@ -2571,10 +2826,55 @@ async function initApp() {
     showToast('✅ Usuario guardado en Neon');
   });
 
-  // Historial y Corte
+  // Historial, Periodos (Día, Semana, Mes, 24 Meses, Rango) y Corte
+  const periodSelect = document.getElementById('history-period-select');
+  if (periodSelect) {
+    periodSelect.addEventListener('change', (e) => {
+      const mode = e.target.value;
+      state.historyPeriod = mode;
+      if (['this_week', 'last_week'].includes(mode)) {
+        state.periodGroupBy = 'day';
+      } else if (['last_4_weeks', 'this_month', 'last_month', 'pick_month'].includes(mode)) {
+        state.periodGroupBy = 'week';
+      } else {
+        state.periodGroupBy = 'month';
+      }
+      syncHistoryPeriodInputs();
+      loadSales();
+    });
+  }
+
   dateInput.addEventListener('change', (e) => {
     state.selectedDate = e.target.value;
     loadSales();
+  });
+
+  if (monthInput) {
+    monthInput.addEventListener('change', (e) => {
+      state.selectedMonth = e.target.value;
+      loadSales();
+    });
+  }
+
+  if (startDateInput) {
+    startDateInput.addEventListener('change', (e) => {
+      state.customStartDate = e.target.value;
+      loadSales();
+    });
+  }
+
+  if (endDateInput) {
+    endDateInput.addEventListener('change', (e) => {
+      state.customEndDate = e.target.value;
+      loadSales();
+    });
+  }
+
+  document.querySelectorAll('.period-group-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.periodGroupBy = btn.dataset.group;
+      renderSalesHistory();
+    });
   });
 
   document.getElementById('history-cashier-filter').addEventListener('change', (e) => {
