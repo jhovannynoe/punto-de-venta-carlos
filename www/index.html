@@ -118,29 +118,42 @@
         <div class="pos-layout">
           <!-- Left: Products / Services Grid -->
           <div class="pos-catalog-pane">
-            <div class="pos-toolbar">
-              <div class="search-box">
-                <span class="search-icon">🔍</span>
-                <input type="text" id="pos-search" placeholder="Buscar producto, servicio o servicio especial..." autocomplete="off" />
+            <div class="pos-sticky-controls">
+              <div class="pos-toolbar">
+                <div class="search-box">
+                  <span class="search-icon">🔍</span>
+                  <input type="text" id="pos-search" placeholder="Buscar producto, servicio o categoría..." autocomplete="off" />
+                  <button type="button" id="btn-clear-search" class="btn-clear-search hidden" title="Limpiar búsqueda">✕</button>
+                </div>
+                <button type="button" id="btn-toggle-all-cats" class="btn btn-secondary btn-compact-tool" title="Expandir o contraer todas las categorías">
+                  📂 Categorías
+                </button>
+                <button id="btn-quick-item" class="btn btn-accent btn-compact-tool">
+                  ⚡ Libre
+                </button>
               </div>
-              <button id="btn-quick-item" class="btn btn-accent">
-                ⚡ Concepto Libre
-              </button>
+
+              <div id="category-chips" class="category-chips"></div>
             </div>
 
             <!-- Banner informativo de Promociones Activas en Caja -->
             <div id="pos-active-promos-bar" class="active-promos-bar hidden"></div>
 
-            <div id="category-chips" class="category-chips"></div>
-
             <div id="pos-products-grid" class="products-grid"></div>
           </div>
 
-          <!-- Right: Current Sale Cart -->
-          <aside class="pos-cart-pane">
+          <!-- Backdrop para el carrito deslizable en móvil -->
+          <div id="mobile-cart-backdrop" class="mobile-cart-backdrop hidden"></div>
+
+          <!-- Right: Current Sale Cart (Lateral en PC/Tablet, Drawer deslizable en Móvil) -->
+          <aside id="pos-cart-pane" class="pos-cart-pane">
+            <div class="cart-drawer-handle"></div>
             <div class="cart-header">
-              <h2>Ticket Actual</h2>
-              <button id="btn-clear-cart" class="btn-text-danger" title="Vaciar carrito">Vaciar</button>
+              <h2>🧾 Ticket Actual</h2>
+              <div class="cart-header-actions">
+                <button id="btn-clear-cart" class="btn-text-danger" title="Vaciar carrito">Vaciar</button>
+                <button type="button" id="btn-close-mobile-cart" class="btn-close-mobile-cart" title="Cerrar ticket">✕ Cerrar</button>
+              </div>
             </div>
 
             <div id="cart-items-list" class="cart-items-list"></div>
@@ -374,13 +387,21 @@
 
     <!-- Mobile Sticky Cart Bar -->
     <div id="mobile-cart-bar" class="mobile-cart-bar hidden">
-      <div>
-        <span id="mobile-cart-count">0 conceptos</span>
+      <div id="btn-mobile-view-cart" class="mobile-cart-summary" role="button" tabindex="0" title="Toca para ver o editar los productos del ticket">
+        <span class="mobile-cart-summary-top">
+          <span id="mobile-cart-count">0 conceptos</span>
+          <span class="mobile-cart-edit-pill">▲ Ver / Editar</span>
+        </span>
         <strong id="mobile-cart-total">$0.00</strong>
       </div>
-      <button id="btn-mobile-checkout" class="btn btn-primary">
-        Ver / Cobrar →
-      </button>
+      <div class="mobile-cart-actions">
+        <button type="button" id="btn-mobile-open-drawer" class="btn btn-secondary btn-sm">
+          🧾 Ticket
+        </button>
+        <button type="button" id="btn-mobile-checkout" class="btn btn-primary">
+          Cobrar →
+        </button>
+      </div>
     </div>
   </div>
 
