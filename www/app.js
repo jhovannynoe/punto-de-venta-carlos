@@ -1285,7 +1285,6 @@ function renderLoginScreen() {
       document.getElementById('login-pin-input').value = '';
       grid.classList.add('hidden');
       pinForm.classList.remove('hidden');
-      setTimeout(() => document.getElementById('login-pin-input').focus(), 80);
     });
   });
 }
@@ -2822,8 +2821,30 @@ async function initApp() {
       } else if (input.value.length < 8) {
         input.value += key;
       }
-      input.focus();
     });
+  });
+
+  // Permitir teclear el PIN con teclado físico en PC sin abrir el teclado virtual en móvil/tablet
+  window.addEventListener('keydown', (e) => {
+    if (state.currentUser || !state.selectedLoginUser) return;
+    const pinForm = document.getElementById('form-login-pin');
+    if (!pinForm || pinForm.classList.contains('hidden')) return;
+    const input = document.getElementById('login-pin-input');
+    if (!input) return;
+
+    if (/^[0-9]$/.test(e.key)) {
+      e.preventDefault();
+      if (input.value.length < 8) input.value += e.key;
+    } else if (e.key === 'Backspace') {
+      e.preventDefault();
+      input.value = input.value.slice(0, -1);
+    } else if (e.key === 'Delete' || e.key === 'Escape') {
+      e.preventDefault();
+      input.value = '';
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      pinForm.requestSubmit();
+    }
   });
 
   document.getElementById('form-login-pin').addEventListener('submit', async (e) => {
@@ -2841,7 +2862,6 @@ async function initApp() {
     } catch {
       showToast('❌ PIN incorrecto, intenta de nuevo');
       document.getElementById('login-pin-input').value = '';
-      document.getElementById('login-pin-input').focus();
     }
   });
 
