@@ -7,7 +7,7 @@
   <title>Punto de Venta Carlos | Web & APK</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=7" />
 </head>
 <body>
   <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
@@ -710,9 +710,18 @@
 
   <script>
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!refreshing) {
+          refreshing = true;
+          window.location.reload();
+        }
+      });
+      navigator.serviceWorker.register('/sw.js?v=7').then((reg) => {
+        reg.update().catch(() => {});
+      }).catch(() => {});
     }
   </script>
-  <script src="app.js" type="module"></script>
+  <script src="app.js?v=7" type="module"></script>
 </body>
 </html>

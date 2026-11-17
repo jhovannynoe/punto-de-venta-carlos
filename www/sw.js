@@ -1,16 +1,27 @@
-const CACHE_NAME = 'pos-carlos-instant-v6';
+const CACHE_NAME = 'pos-carlos-instant-v7';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
-  '/styles.css',
-  '/app.js',
+  '/styles.css?v=7',
+  '/app.js?v=7',
   '/manifest.json',
   '/icon.svg',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS_TO_CACHE)).catch(() => {})
+    caches
+      .open(CACHE_NAME)
+      .then((cache) =>
+        Promise.all(
+          ASSETS_TO_CACHE.map((url) =>
+            fetch(url, { cache: 'reload' }).then((res) => {
+              if (res.ok) return cache.put(url, res);
+            })
+          )
+        )
+      )
+      .catch(() => {})
   );
   self.skipWaiting();
 });
