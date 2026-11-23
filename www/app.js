@@ -13,6 +13,7 @@ const OfflineStore = {
     PRODUCTS: 'pos_cache_products_v1',
     PROMOS: 'pos_cache_promos_v1',
     SALES: 'pos_cache_sales_v1',
+    CUTS: 'pos_cache_cuts_v1',
     QUEUE: 'pos_pending_sales_queue_v1',
   },
 
@@ -151,6 +152,26 @@ async function ensureNeonSchemaDirect() {
   `);
   await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
   await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cut_id INTEGER DEFAULT NULL;`);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS cash_cuts (
+      id SERIAL PRIMARY KEY,
+      cashier_id INTEGER,
+      cashier_name TEXT NOT NULL DEFAULT 'General',
+      sales_count INTEGER NOT NULL DEFAULT 0,
+      gross_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      net_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      expected_cash NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      counted_cash NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      cash_difference NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      card_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      transfer_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      note TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS sale_items (
@@ -672,7 +693,8 @@ const DataService = {
                     COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                     amount_received::float AS amount_received, change_given::float AS change_given,
                     note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                    cut_id, created_at
              FROM sales
              WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
                AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -686,7 +708,8 @@ const DataService = {
                     COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                     amount_received::float AS amount_received, change_given::float AS change_given,
                     note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                    cut_id, created_at
              FROM sales
              WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
                AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -699,7 +722,8 @@ const DataService = {
                     COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                     amount_received::float AS amount_received, change_given::float AS change_given,
                     note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                    COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                    cut_id, created_at
              FROM sales
              ORDER BY created_at DESC
              LIMIT 500`
@@ -947,6 +971,131 @@ const DataService = {
     await neonQuery('DELETE FROM sales WHERE id = $1', [Number(saleId)]);
     return true;
   },
+
+  async getCashCuts(startDateStr, endDateStr, cashierId = 'all') {
+    const startParam = startDateStr || getTodayLocalISO();
+    const endParam = endDateStr || startParam;
+    try {
+      if (!this.useDirectNeon) {
+        const params = new URLSearchParams();
+        if (startParam) params.set('start_date', startParam);
+        if (endParam) params.set('end_date', endParam);
+        if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
+        const res = await fetch(`/api/cash-cuts?${params.toString()}`);
+        if (res.ok) {
+          const rows = await res.json();
+          OfflineStore.set(OfflineStore.KEYS.CUTS, rows);
+          return rows;
+        }
+      }
+      await ensureNeonSchemaDirect();
+      let rows;
+      if (startParam && endParam && cashierId && cashierId !== 'all') {
+        rows = await neonQuery(
+          `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                  refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                  expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                  cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                  transfer_sales::float AS transfer_sales, note, created_at
+           FROM cash_cuts
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+             AND cashier_id = $3
+           ORDER BY created_at DESC`,
+          [startParam, endParam, Number(cashierId)]
+        );
+      } else {
+        rows = await neonQuery(
+          `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                  refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                  expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                  cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                  transfer_sales::float AS transfer_sales, note, created_at
+           FROM cash_cuts
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+           ORDER BY created_at DESC`,
+          [startParam, endParam]
+        );
+      }
+      OfflineStore.set(OfflineStore.KEYS.CUTS, rows);
+      return rows;
+    } catch {
+      return OfflineStore.get(OfflineStore.KEYS.CUTS, []);
+    }
+  },
+
+  async createCashCut(payload) {
+    try {
+      if (!this.useDirectNeon) {
+        const res = await fetch('/api/cash-cuts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) return res.json();
+      }
+      await ensureNeonSchemaDirect();
+      const cashierId = payload.cashier_id ? Number(payload.cashier_id) : null;
+      const cashierName = String(payload.cashier_name || 'General').trim();
+      const salesCount = Number(payload.sales_count || 0);
+      const grossSales = Number(payload.gross_sales || 0);
+      const refundedTotal = Number(payload.refunded_total || 0);
+      const netSales = Number(payload.net_sales || 0);
+      const expectedCash = Number(payload.expected_cash || 0);
+      const countedCash = Number(payload.counted_cash ?? expectedCash);
+      const cashDifference = Number((countedCash - expectedCash).toFixed(2));
+      const cardSales = Number(payload.card_sales || 0);
+      const transferSales = Number(payload.transfer_sales || 0);
+      const note = String(payload.note || '').trim();
+      const saleIds = Array.isArray(payload.sale_ids)
+        ? payload.sale_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+
+      const rows = await neonQuery(
+        `INSERT INTO cash_cuts (
+           cashier_id, cashier_name, sales_count, gross_sales, refunded_total,
+           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales, note
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                   transfer_sales::float AS transfer_sales, note, created_at`,
+        [
+          cashierId,
+          cashierName,
+          salesCount,
+          grossSales,
+          refundedTotal,
+          netSales,
+          expectedCash,
+          countedCash,
+          cashDifference,
+          cardSales,
+          transferSales,
+          note,
+        ]
+      );
+      const cut = rows[0];
+      if (saleIds.length > 0) {
+        await neonQuery('UPDATE sales SET cut_id = $1 WHERE id = ANY($2::int[])', [cut.id, saleIds]);
+      }
+      return cut;
+    } catch {
+      const localCut = {
+        id: `LOCAL-${Date.now().toString().slice(-4)}`,
+        ...payload,
+        cash_difference: Number((Number(payload.counted_cash || 0) - Number(payload.expected_cash || 0)).toFixed(2)),
+        created_at: new Date().toISOString(),
+      };
+      const cuts = OfflineStore.get(OfflineStore.KEYS.CUTS, []);
+      cuts.unshift(localCut);
+      OfflineStore.set(OfflineStore.KEYS.CUTS, cuts);
+      return localCut;
+    }
+  },
 };
 
 function updateConnectionUI() {
@@ -981,6 +1130,8 @@ const state = {
   promotions: [],
   cart: [],
   sales: [],
+  cashCuts: [],
+  showAllDaySalesInHistory: false,
   selectedCategory: 'Todos',
   collapsedCategories: {},
   categoriesInitialized: false,
@@ -2039,26 +2190,60 @@ function renderSalesHistory() {
   const listEl = document.getElementById('sales-history-list');
   const rangeInfo = getActiveHistoryDateRange();
 
+  const openSales = state.sales.filter((s) => !s.cut_id);
+  const closedSales = state.sales.filter((s) => Boolean(s.cut_id));
+  const hasClosedCutsInView = closedSales.length > 0 || (state.cashCuts && state.cashCuts.length > 0);
+
+  // En vista diaria ("day"), por defecto mostrar el Turno Abierto actual (para que al cerrar turno quede en $0.00)
+  // con botón para alternar si desea ver todas las ventas del día incluyendo turnos cerrados
+  const filterToOpenTurn = !rangeInfo.isMultiDay && hasClosedCutsInView && !state.showAllDaySalesInHistory;
+  const activeSales = filterToOpenTurn ? openSales : state.sales;
+
   const bannerEl = document.getElementById('history-period-banner');
   if (bannerEl) {
+    const toggleViewBtnHtml =
+      !rangeInfo.isMultiDay && hasClosedCutsInView
+        ? `<button type="button" id="btn-toggle-turn-view" class="chip-btn" style="font-size:0.78rem; padding:0.25rem 0.65rem;">
+             ${filterToOpenTurn
+               ? `📋 Ver todo el día (${state.sales.length} ventas)`
+               : `🟢 Ver solo Turno Activo (${openSales.length} abiertas)`}
+           </button>`
+        : '';
+
     bannerEl.innerHTML = `
-      <span>📅 <strong>Periodo consultado:</strong> ${escapeHtml(rangeInfo.label)}</span>
-      <span>Operaciones encontradas: <strong>${state.sales.length}</strong></span>
+      <span>
+        📅 <strong>${escapeHtml(rangeInfo.label)}</strong> •
+        ${filterToOpenTurn
+          ? `<strong style="color:var(--success);">🟢 Viendo Turno Activo (${openSales.length} venta(s) abiertas)</strong>`
+          : `Operaciones mostradas: <strong>${activeSales.length}</strong>`}
+      </span>
+      <span style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+        ${hasClosedCutsInView ? `<span class="sale-badge tarjeta">🔒 ${state.cashCuts.length} corte(s) cerrado(s)</span>` : ''}
+        ${toggleViewBtnHtml}
+      </span>
     `;
+
+    const toggleBtn = document.getElementById('btn-toggle-turn-view');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        state.showAllDaySalesInHistory = !state.showAllDaySalesInHistory;
+        renderSalesHistory();
+      });
+    }
   }
 
-  const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
-  const totalRefunded = state.sales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
+  const grossSales = activeSales.reduce((sum, s) => sum + Number(s.total), 0);
+  const totalRefunded = activeSales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
   const netSales = Math.max(0, grossSales - totalRefunded);
 
-  const cashSalesNet = state.sales
+  const cashSalesNet = activeSales
     .filter((s) => s.payment_method === 'efectivo')
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
-  const digitalSalesNet = state.sales
+  const digitalSalesNet = activeSales
     .filter((s) => s.payment_method !== 'efectivo')
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
 
-  const returnsCount = state.sales.reduce(
+  const returnsCount = activeSales.reduce(
     (count, s) => count + ((s.returns && s.returns.length) || (Number(s.refunded_total || 0) > 0 ? 1 : 0)),
     0
   );
@@ -2066,15 +2251,65 @@ function renderSalesHistory() {
   document.getElementById('kpi-total-sales').textContent = formatMoney(netSales);
   document.getElementById('kpi-sales-count').textContent =
     totalRefunded > 0
-      ? `${state.sales.length} venta(s) • Bruto: ${formatMoney(grossSales)}`
-      : `${state.sales.length} venta(s) registrada(s)`;
+      ? `${activeSales.length} venta(s) • Bruto: ${formatMoney(grossSales)}`
+      : `${activeSales.length} venta(s) ${filterToOpenTurn ? 'en turno activo' : 'registrada(s)'}`;
   document.getElementById('kpi-cash-sales').textContent = formatMoney(cashSalesNet);
   document.getElementById('kpi-digital-sales').textContent = formatMoney(digitalSalesNet);
 
   const kpiRetTotalEl = document.getElementById('kpi-returns-total');
   const kpiRetCountEl = document.getElementById('kpi-returns-count');
   if (kpiRetTotalEl) kpiRetTotalEl.textContent = `-${formatMoney(totalRefunded)}`;
-  if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) en el periodo`;
+  if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) en vista`;
+
+  // Renderizar tabla de Cortes Cerrados en el periodo
+  const closedCutsBox = document.getElementById('closed-cuts-box');
+  const closedCutsTbody = document.getElementById('closed-cuts-tbody');
+  if (closedCutsBox && closedCutsTbody) {
+    const cuts = state.cashCuts || [];
+    closedCutsBox.classList.toggle('hidden', cuts.length === 0);
+    if (cuts.length > 0) {
+      closedCutsTbody.innerHTML = cuts
+        .map((c) => {
+          const dt = new Date(c.created_at);
+          const timeLabel = rangeInfo.isMultiDay
+            ? dt.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' }) +
+              ' ' +
+              dt.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+            : dt.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+          const diff = Number(c.cash_difference || 0);
+          let diffHtml = `<span style="color:var(--success); font-weight:700;">✅ Exacto ($0.00)</span>`;
+          if (diff > 0.009) {
+            diffHtml = `<span style="color:#6ee7b7; font-weight:700;">🟢 Sobrante +${formatMoney(diff)}</span>`;
+          } else if (diff < -0.009) {
+            diffHtml = `<span style="color:#fca5a5; font-weight:700;">🔴 Faltante -${formatMoney(Math.abs(diff))}</span>`;
+          }
+          return `
+            <tr>
+              <td><strong>🔒 Corte #${c.id}</strong><div style="font-size:0.75rem; color:var(--text-muted);">🕒 ${timeLabel}</div></td>
+              <td><strong>🧑‍💼 ${escapeHtml(c.cashier_name)}</strong>${c.note ? `<div style="font-size:0.75rem; color:var(--text-muted);">Nota: ${escapeHtml(c.note)}</div>` : ''}</td>
+              <td>${c.sales_count} venta(s)</td>
+              <td>${formatMoney(c.expected_cash)}</td>
+              <td><strong>${formatMoney(c.counted_cash)}</strong></td>
+              <td>${diffHtml}</td>
+              <td><strong style="color:var(--primary);">${formatMoney(c.net_sales)}</strong></td>
+              <td>
+                <button type="button" class="btn btn-secondary btn-sm btn-print-closed-cut" data-cut-id="${c.id}">
+                  🧾 Ver / Imprimir
+                </button>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+
+      closedCutsTbody.querySelectorAll('.btn-print-closed-cut').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cut = (state.cashCuts || []).find((c) => String(c.id) === String(btn.dataset.cutId));
+          if (cut) showClosedCutTicketModal(cut);
+        });
+      });
+    }
+  }
 
   // Tabla de Resumen Agrupado por Periodo (Por Mes / Por Semana / Por Día) cuando es vista multi-día
   const periodSummaryBox = document.getElementById('period-summary-box');
@@ -2135,7 +2370,7 @@ function renderSalesHistory() {
 
   if (isAdmin) {
     const byCashier = {};
-    for (const s of state.sales) {
+    for (const s of activeSales) {
       const cName = s.cashier_name || 'General';
       if (!byCashier[cName]) {
         byCashier[cName] = { count: 0, cash: 0, digital: 0, refunded: 0, net: 0 };
@@ -2154,7 +2389,7 @@ function renderSalesHistory() {
     const breakdownTbody = document.getElementById('cashier-breakdown-tbody');
     const names = Object.keys(byCashier);
     if (names.length === 0) {
-      breakdownTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas en este periodo</td></tr>`;
+      breakdownTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas abiertas en este turno</td></tr>`;
     } else {
       breakdownTbody.innerHTML = names
         .map(
@@ -2173,12 +2408,16 @@ function renderSalesHistory() {
     }
   }
 
-  if (state.sales.length === 0) {
-    listEl.innerHTML = `<div class="cart-empty">No hay ventas registradas para mostrar en ${escapeHtml(rangeInfo.label)}.</div>`;
+  if (activeSales.length === 0) {
+    listEl.innerHTML = `<div class="cart-empty">${
+      filterToOpenTurn
+        ? '✅ El turno actual ya fue cerrado y está en $0.00 (listo para nuevas ventas). Puedes ver o imprimir los cortes cerrados arriba.'
+        : `No hay ventas registradas para mostrar en ${escapeHtml(rangeInfo.label)}.`
+    }</div>`;
     return;
   }
 
-  listEl.innerHTML = state.sales
+  listEl.innerHTML = activeSales
     .map((s) => {
       const dObj = new Date(s.created_at);
       const timeStr = rangeInfo.isMultiDay
@@ -2196,6 +2435,9 @@ function renderSalesHistory() {
 
       const pendingBadge = s.pending_sync
         ? `<span class="sale-badge transferencia">⏳ Guardada en equipo (Pendiente subir)</span>`
+        : '';
+      const cutBadge = s.cut_id
+        ? `<span class="sale-badge tarjeta">🔒 Cerrada en Corte #${s.cut_id}</span>`
         : '';
 
       const refundedAmt = Number(s.refunded_total || 0);
@@ -2240,6 +2482,7 @@ function renderSalesHistory() {
               <span class="sale-badge ${s.payment_method}">${s.payment_method}</span>
               <span class="cashier-tag">🧑‍💼 ${escapeHtml(s.cashier_name || 'General')}</span>
               ${statusBadge}
+              ${cutBadge}
               ${pendingBadge}
               <span style="color:var(--text-muted); font-size:0.85rem;">🕒 ${timeStr}</span>
             </div>
@@ -2649,6 +2892,164 @@ function showDailyCorteModal() {
   document.getElementById('modal-receipt').classList.remove('hidden');
 }
 
+// ==========================================
+// CIERRE FORMAL DE VENTA DEL DÍA / TURNO (CON CONFIRMACIÓN)
+// ==========================================
+let activeCutDraft = null;
+
+function getOpenShiftSummary() {
+  const openSales = state.sales.filter((s) => !s.cut_id);
+  const grossSales = openSales.reduce((sum, s) => sum + Number(s.total), 0);
+  const refundedTotal = openSales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
+  const netSales = Math.max(0, grossSales - refundedTotal);
+  const expectedCash = openSales
+    .filter((s) => s.payment_method === 'efectivo')
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+  const cardSales = openSales
+    .filter((s) => s.payment_method === 'tarjeta')
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+  const transferSales = openSales
+    .filter((s) => s.payment_method === 'transferencia')
+    .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
+
+  return {
+    openSales,
+    saleIds: openSales.map((s) => Number(s.id)).filter((id) => Number.isInteger(id) && id > 0),
+    salesCount: openSales.length,
+    grossSales,
+    refundedTotal,
+    netSales,
+    expectedCash,
+    cardSales,
+    transferSales,
+    digitalTotal: cardSales + transferSales,
+  };
+}
+
+function updateCloseCutDifference() {
+  if (!activeCutDraft) return;
+  const counted = Number(document.getElementById('close-cut-counted-cash').value || 0);
+  const diff = Number((counted - activeCutDraft.expectedCash).toFixed(2));
+  const diffTextEl = document.getElementById('close-cut-diff-text');
+
+  if (Math.abs(diff) <= 0.009) {
+    diffTextEl.textContent = '✅ Exacto ($0.00)';
+    diffTextEl.style.color = 'var(--success)';
+  } else if (diff > 0) {
+    diffTextEl.textContent = `🟢 Sobrante: +${formatMoney(diff)}`;
+    diffTextEl.style.color = '#6ee7b7';
+  } else {
+    diffTextEl.textContent = `🔴 Faltante: -${formatMoney(Math.abs(diff))}`;
+    diffTextEl.style.color = '#fca5a5';
+  }
+}
+
+function openCloseCutModal() {
+  const summary = getOpenShiftSummary();
+  if (summary.salesCount === 0) {
+    showToast('⚠️ No hay ventas abiertas pendientes de cerrar en este turno.');
+    return;
+  }
+
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  let scopeName = state.currentUser ? state.currentUser.name : 'General';
+  if (isAdmin) {
+    if (state.selectedCashierFilter === 'all') {
+      scopeName = `Corte General (${state.currentUser.name})`;
+    } else {
+      const matchUser = state.users.find((u) => String(u.id) === String(state.selectedCashierFilter));
+      scopeName = matchUser ? matchUser.name : state.currentUser.name;
+    }
+  }
+
+  activeCutDraft = {
+    ...summary,
+    cashierId: state.currentUser ? state.currentUser.id : null,
+    cashierName: scopeName,
+  };
+
+  document.getElementById('close-cut-subtitle').textContent = `Responsable: ${scopeName}`;
+  document.getElementById('close-cut-sales-count').textContent = `${summary.salesCount} venta(s)`;
+  document.getElementById('close-cut-net-total').textContent = formatMoney(summary.netSales);
+  document.getElementById('close-cut-digital-total').textContent = formatMoney(summary.digitalTotal);
+  document.getElementById('close-cut-refunds-total').textContent = `-${formatMoney(summary.refundedTotal)}`;
+  document.getElementById('close-cut-expected-cash').textContent = formatMoney(summary.expectedCash);
+
+  const countedInput = document.getElementById('close-cut-counted-cash');
+  countedInput.value = summary.expectedCash.toFixed(2);
+  document.getElementById('close-cut-note').value = '';
+
+  document.getElementById('close-cut-step-1-footer').classList.remove('hidden');
+  document.getElementById('close-cut-confirm-box').classList.add('hidden');
+
+  updateCloseCutDifference();
+  document.getElementById('modal-close-cut').classList.remove('hidden');
+}
+
+function showClosedCutTicketModal(cut) {
+  const dtStr = new Date(cut.created_at).toLocaleString('es-MX');
+  const diff = Number(cut.cash_difference || 0);
+  let diffLabel = 'EXACTO ($0.00)';
+  if (diff > 0.009) diffLabel = `SOBRANTE (+${formatMoney(diff)})`;
+  else if (diff < -0.009) diffLabel = `FALTANTE (-${formatMoney(Math.abs(diff))})`;
+
+  document.getElementById('receipt-title').textContent = `Comprobante de Cierre #${cut.id}`;
+  document.getElementById('receipt-content').innerHTML = `
+    <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <h3 style="margin:0;">CIERRE DE TURNO / CORTE DE CAJA</h3>
+      <div>Folio de Corte: <strong>#${cut.id}</strong></div>
+      <div>Responsable: <strong>${escapeHtml(cut.cashier_name)}</strong></div>
+      <div style="font-size:0.8rem;">Fecha y Hora: ${dtStr}</div>
+    </div>
+    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>Ventas Cerradas:</span>
+        <strong>${cut.sales_count} operación(es)</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>Ventas Brutas:</span>
+        <strong>${formatMoney(cut.gross_sales)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>↩️ Devoluciones:</span>
+        <strong>-${formatMoney(cut.refunded_total)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0; font-size:1.05rem;">
+        <span>TOTAL NETO VENDIDO:</span>
+        <strong>${formatMoney(cut.net_sales)}</strong>
+      </div>
+    </div>
+    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>💳 Cobros con Tarjeta:</span>
+        <strong>${formatMoney(cut.card_sales)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>📲 Transferencias:</span>
+        <strong>${formatMoney(cut.transfer_sales)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>💵 Efectivo Esperado en Caja:</span>
+        <strong>${formatMoney(cut.expected_cash)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>💵 Efectivo Físico Entregado:</span>
+        <strong>${formatMoney(cut.counted_cash)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>Diferencia de Efectivo:</span>
+        <strong>${diffLabel}</strong>
+      </div>
+    </div>
+    ${cut.note ? `<div style="margin-bottom:10px; font-size:0.82rem;"><strong>Observaciones:</strong> ${escapeHtml(cut.note)}</div>` : ''}
+    <div style="margin-top:26px; text-align:center; font-size:0.8rem;">
+      ___________________________________<br/>
+      Firma de Entrega / Conformidad
+    </div>
+  `;
+  document.getElementById('modal-receipt').classList.remove('hidden');
+}
+
 // Modal de Cobro
 function openCheckoutModal() {
   if (state.cart.length === 0) return;
@@ -2762,7 +3163,12 @@ async function loadSales() {
   const cashierFilter =
     state.currentUser.role === 'admin' ? state.selectedCashierFilter : String(state.currentUser.id);
   const rangeInfo = getActiveHistoryDateRange();
-  state.sales = await DataService.getSales(rangeInfo.startDate, rangeInfo.endDate, cashierFilter);
+  const [sales, cashCuts] = await Promise.all([
+    DataService.getSales(rangeInfo.startDate, rangeInfo.endDate, cashierFilter),
+    DataService.getCashCuts(rangeInfo.startDate, rangeInfo.endDate, cashierFilter),
+  ]);
+  state.sales = sales;
+  state.cashCuts = cashCuts;
   renderSalesHistory();
 }
 
@@ -3149,6 +3555,103 @@ async function initApp() {
 
   document.getElementById('btn-print-corte').addEventListener('click', showDailyCorteModal);
   document.getElementById('btn-print-receipt').addEventListener('click', () => window.print());
+
+  const btnOpenCloseCut = document.getElementById('btn-open-close-cut');
+  if (btnOpenCloseCut) {
+    btnOpenCloseCut.addEventListener('click', openCloseCutModal);
+  }
+
+  const countedCashInput = document.getElementById('close-cut-counted-cash');
+  if (countedCashInput) {
+    countedCashInput.addEventListener('input', updateCloseCutDifference);
+  }
+
+  const btnCloseCutExact = document.getElementById('btn-close-cut-exact');
+  if (btnCloseCutExact) {
+    btnCloseCutExact.addEventListener('click', () => {
+      if (!activeCutDraft) return;
+      document.getElementById('close-cut-counted-cash').value = activeCutDraft.expectedCash.toFixed(2);
+      updateCloseCutDifference();
+    });
+  }
+
+  const btnAskCloseCut = document.getElementById('btn-ask-close-cut');
+  if (btnAskCloseCut) {
+    btnAskCloseCut.addEventListener('click', () => {
+      if (!activeCutDraft) return;
+      const countedCash = Number(document.getElementById('close-cut-counted-cash').value || 0);
+      const diff = Number((countedCash - activeCutDraft.expectedCash).toFixed(2));
+      let diffMsg = 'Exacto ($0.00)';
+      if (diff > 0.009) diffMsg = `Sobrante de +${formatMoney(diff)}`;
+      else if (diff < -0.009) diffMsg = `Faltante de -${formatMoney(Math.abs(diff))}`;
+
+      document.getElementById('close-cut-confirm-detail').innerHTML =
+        `Se cerrarán <strong>${activeCutDraft.salesCount} venta(s)</strong> con un Total Neto de <strong>${formatMoney(
+          activeCutDraft.netSales
+        )}</strong>.<br/>` +
+        `💵 Efectivo entregado: <strong>${formatMoney(countedCash)}</strong> (${diffMsg}).<br/>` +
+        `Al confirmar, se generará el comprobante de corte y la caja activa iniciará en <strong>$0.00</strong>.`;
+
+      document.getElementById('close-cut-step-1-footer').classList.add('hidden');
+      document.getElementById('close-cut-confirm-box').classList.remove('hidden');
+    });
+  }
+
+  const btnCancelConfirmCut = document.getElementById('btn-cancel-confirm-cut');
+  if (btnCancelConfirmCut) {
+    btnCancelConfirmCut.addEventListener('click', () => {
+      document.getElementById('close-cut-confirm-box').classList.add('hidden');
+      document.getElementById('close-cut-step-1-footer').classList.remove('hidden');
+    });
+  }
+
+  const formCloseCut = document.getElementById('form-close-cut');
+  if (formCloseCut) {
+    formCloseCut.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!activeCutDraft) return;
+
+      const confirmBox = document.getElementById('close-cut-confirm-box');
+      if (confirmBox && confirmBox.classList.contains('hidden')) {
+        document.getElementById('btn-ask-close-cut').click();
+        return;
+      }
+
+      const countedCash = Number(document.getElementById('close-cut-counted-cash').value || 0);
+
+      const btn = document.getElementById('btn-confirm-close-cut');
+      btn.disabled = true;
+      btn.textContent = 'Cerrando turno...';
+
+      try {
+        const createdCut = await DataService.createCashCut({
+          cashier_id: activeCutDraft.cashierId,
+          cashier_name: activeCutDraft.cashierName,
+          sales_count: activeCutDraft.salesCount,
+          gross_sales: activeCutDraft.grossSales,
+          refunded_total: activeCutDraft.refundedTotal,
+          net_sales: activeCutDraft.netSales,
+          expected_cash: activeCutDraft.expectedCash,
+          counted_cash: countedCash,
+          card_sales: activeCutDraft.cardSales,
+          transfer_sales: activeCutDraft.transferSales,
+          note: document.getElementById('close-cut-note').value.trim(),
+          sale_ids: activeCutDraft.saleIds,
+        });
+
+        state.showAllDaySalesInHistory = false;
+        document.getElementById('modal-close-cut').classList.add('hidden');
+        await loadSales();
+        showClosedCutTicketModal(createdCut);
+        showToast(`🔒 Turno cerrado correctamente (Corte #${createdCut.id}). Caja reiniciada a $0.00`);
+      } catch (err) {
+        showToast(`❌ Error al cerrar turno: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '✅ Sí, confirmar y cerrar';
+      }
+    });
+  }
 
   // Eventos del Modal de Devoluciones (Puntos 1 al 4)
   document.getElementById('btn-return-select-all').addEventListener('click', () => {

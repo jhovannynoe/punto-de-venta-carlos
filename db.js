@@ -144,6 +144,27 @@ export async function initDatabase() {
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS promo_summary TEXT DEFAULT '';`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cut_id INTEGER DEFAULT NULL;`);
+
+  // 7. Tabla de Cortes de Caja / Cierres de Turno
+  await query(`
+    CREATE TABLE IF NOT EXISTS cash_cuts (
+      id SERIAL PRIMARY KEY,
+      cashier_id INTEGER,
+      cashier_name TEXT NOT NULL DEFAULT 'General',
+      sales_count INTEGER NOT NULL DEFAULT 0,
+      gross_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      net_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      expected_cash NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      counted_cash NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      cash_difference NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      card_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      transfer_sales NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      note TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
   // 5. Tabla de conceptos por venta
   await query(`

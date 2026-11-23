@@ -7,7 +7,7 @@
   <title>Punto de Venta Carlos | Web & APK</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="styles.css?v=7" />
+  <link rel="stylesheet" href="styles.css?v=8" />
 </head>
 <body>
   <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
@@ -225,7 +225,8 @@
             </div>
 
             <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
-            <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Corte / Reporte</button>
+            <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Reporte</button>
+            <button id="btn-open-close-cut" class="btn btn-success">🔒 Cerrar Turno / Caja</button>
           </div>
         </div>
 
@@ -291,6 +292,28 @@
               </tr>
             </thead>
             <tbody id="period-summary-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Historial de Cortes de Turno Cerrados en el Periodo -->
+        <div id="closed-cuts-box" class="table-container hidden" style="margin-bottom: 1.5rem;">
+          <div class="period-summary-header">
+            <strong id="closed-cuts-title">🔒 Cortes de Turno / Cierres de Caja Realizados</strong>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Corte / Hora</th>
+                <th>Cajero / Alcance</th>
+                <th>Ventas</th>
+                <th>💵 Efectivo Esperado</th>
+                <th>💵 Efectivo Entregado</th>
+                <th>Diferencia</th>
+                <th>Total Neto</th>
+                <th>Comprobante</th>
+              </tr>
+            </thead>
+            <tbody id="closed-cuts-tbody"></tbody>
           </table>
         </div>
 
@@ -689,6 +712,88 @@
     </div>
   </div>
 
+  <!-- MODAL: CIERRE DE TURNO / CORTE DE CAJA DEL DÍA -->
+  <div id="modal-close-cut" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>🔒 Cerrar Venta del Día / Turno</h3>
+          <p id="close-cut-subtitle" class="subtitle">Arqueo y cierre formal de caja</p>
+        </div>
+        <button class="modal-close" data-close="modal-close-cut">✕</button>
+      </div>
+      <form id="form-close-cut" class="modal-body">
+        <div class="close-cut-summary-grid">
+          <div class="close-cut-stat">
+            <span>Ventas a cerrar</span>
+            <strong id="close-cut-sales-count">0 ventas</strong>
+          </div>
+          <div class="close-cut-stat">
+            <span>Total Neto del Turno</span>
+            <strong id="close-cut-net-total" style="color:var(--primary);">$0.00</strong>
+          </div>
+          <div class="close-cut-stat">
+            <span>💳 Tarjeta / Transf.</span>
+            <strong id="close-cut-digital-total" style="color:var(--accent);">$0.00</strong>
+          </div>
+          <div class="close-cut-stat">
+            <span>↩️ Devoluciones</span>
+            <strong id="close-cut-refunds-total" style="color:#fca5a5;">-$0.00</strong>
+          </div>
+        </div>
+
+        <div class="checkout-total-banner">
+          <span>💵 Efectivo Esperado en Caja</span>
+          <strong id="close-cut-expected-cash">$0.00</strong>
+        </div>
+
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+            <label class="field-label" for="close-cut-counted-cash" style="margin:0;">💵 Efectivo Físico Contado / Entregado ($) *</label>
+            <button type="button" id="btn-close-cut-exact" class="chip-btn" style="font-size:0.76rem; padding:0.2rem 0.55rem;">
+              Usar monto exacto
+            </button>
+          </div>
+          <input type="number" id="close-cut-counted-cash" class="input input-lg" step="0.01" min="0" placeholder="0.00" required />
+        </div>
+
+        <div id="close-cut-diff-box" class="change-box">
+          <span>Diferencia de efectivo:</span>
+          <strong id="close-cut-diff-text">✅ Exacto ($0.00)</strong>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label" for="close-cut-note">Nota u observaciones del cierre (opcional)</label>
+          <input type="text" id="close-cut-note" class="input" placeholder="Ej. Cierre de día, efectivo entregado a administración..." />
+        </div>
+
+        <!-- Paso 1: Botones iniciales para pasar a la pregunta de confirmación -->
+        <div id="close-cut-step-1-footer" class="modal-footer" style="padding:0.75rem 0 0 0;">
+          <button type="button" class="btn btn-secondary" data-close="modal-close-cut">Cancelar</button>
+          <button type="button" id="btn-ask-close-cut" class="btn btn-success btn-lg">
+            🔒 Cerrar Turno / Día →
+          </button>
+        </div>
+
+        <!-- Paso 2: Pregunta de Confirmación Visual dentro del Modal -->
+        <div id="close-cut-confirm-box" class="return-auth-box hidden" style="border-color:var(--danger); background:rgba(239, 68, 68, 0.12); padding:1rem;">
+          <div style="font-size:1.02rem; font-weight:800; color:#fecaca; margin-bottom:0.45rem;">
+            ⚠️ ¿Estás seguro de cerrar la venta del día / turno?
+          </div>
+          <p id="close-cut-confirm-detail" style="font-size:0.86rem; color:#fde68a; line-height:1.4; margin-bottom:0.85rem;"></p>
+          <div style="display:flex; justify-content:flex-end; gap:0.6rem; flex-wrap:wrap;">
+            <button type="button" id="btn-cancel-confirm-cut" class="btn btn-secondary">
+              ⬅️ No, volver
+            </button>
+            <button type="submit" id="btn-confirm-close-cut" class="btn btn-success btn-lg">
+              ✅ Sí, confirmar y cerrar
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- MODAL: TICKET / CORTE IMPRIMIBLE -->
   <div id="modal-receipt" class="modal-backdrop hidden">
     <div class="modal-card">
@@ -717,11 +822,11 @@
           window.location.reload();
         }
       });
-      navigator.serviceWorker.register('/sw.js?v=7').then((reg) => {
+      navigator.serviceWorker.register('/sw.js?v=8').then((reg) => {
         reg.update().catch(() => {});
       }).catch(() => {});
     }
   </script>
-  <script src="app.js?v=7" type="module"></script>
+  <script src="app.js?v=8" type="module"></script>
 </body>
 </html>

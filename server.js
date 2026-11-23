@@ -280,7 +280,8 @@ async function handleApi(req, res, urlObj) {
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
                   note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                  cut_id, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -294,7 +295,8 @@ async function handleApi(req, res, urlObj) {
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
                   note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                  cut_id, created_at
            FROM sales
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -307,7 +309,8 @@ async function handleApi(req, res, urlObj) {
                   COALESCE(promo_summary, '') AS promo_summary, total::float AS total, payment_method,
                   amount_received::float AS amount_received, change_given::float AS change_given,
                   note, cashier_id, COALESCE(cashier_name, 'General') AS cashier_name,
-                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total, created_at
+                  COALESCE(status, 'completada') AS status, COALESCE(refunded_total, 0)::float AS refunded_total,
+                  cut_id, created_at
            FROM sales
            ORDER BY created_at DESC
            LIMIT 500`
@@ -570,6 +573,108 @@ async function handleApi(req, res, urlObj) {
       }
       await query('DELETE FROM sales WHERE id = $1', [saleId]);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // CORTES DE CAJA / CIERRES DE TURNO
+    if (pathname === '/api/cash-cuts' && method === 'GET') {
+      const startDateParam = urlObj.searchParams.get('start_date');
+      const endDateParam = urlObj.searchParams.get('end_date') || startDateParam;
+      const cashierIdParam = urlObj.searchParams.get('cashier_id');
+
+      let cutRows;
+      if (startDateParam && endDateParam && cashierIdParam && cashierIdParam !== 'all') {
+        cutRows = await query(
+          `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                  refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                  expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                  cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                  transfer_sales::float AS transfer_sales, note, created_at
+           FROM cash_cuts
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+             AND cashier_id = $3
+           ORDER BY created_at DESC`,
+          [startDateParam, endDateParam, Number(cashierIdParam)]
+        );
+      } else if (startDateParam && endDateParam) {
+        cutRows = await query(
+          `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                  refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                  expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                  cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                  transfer_sales::float AS transfer_sales, note, created_at
+           FROM cash_cuts
+           WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
+             AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
+           ORDER BY created_at DESC`,
+          [startDateParam, endDateParam]
+        );
+      } else {
+        cutRows = await query(
+          `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                  refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                  expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                  cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                  transfer_sales::float AS transfer_sales, note, created_at
+           FROM cash_cuts
+           ORDER BY created_at DESC
+           LIMIT 100`
+        );
+      }
+      return sendJson(res, 200, cutRows);
+    }
+
+    if (pathname === '/api/cash-cuts' && method === 'POST') {
+      const body = await parseBody(req);
+      const cashierId = body.cashier_id ? Number(body.cashier_id) : null;
+      const cashierName = String(body.cashier_name || 'General').trim();
+      const salesCount = Number(body.sales_count || 0);
+      const grossSales = Number(body.gross_sales || 0);
+      const refundedTotal = Number(body.refunded_total || 0);
+      const netSales = Number(body.net_sales || 0);
+      const expectedCash = Number(body.expected_cash || 0);
+      const countedCash = Number(body.counted_cash ?? expectedCash);
+      const cashDifference = Number((countedCash - expectedCash).toFixed(2));
+      const cardSales = Number(body.card_sales || 0);
+      const transferSales = Number(body.transfer_sales || 0);
+      const note = String(body.note || '').trim();
+      const saleIds = Array.isArray(body.sale_ids)
+        ? body.sale_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+
+      const rows = await query(
+        `INSERT INTO cash_cuts (
+           cashier_id, cashier_name, sales_count, gross_sales, refunded_total,
+           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales, note
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
+                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
+                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
+                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
+                   transfer_sales::float AS transfer_sales, note, created_at`,
+        [
+          cashierId,
+          cashierName,
+          salesCount,
+          grossSales,
+          refundedTotal,
+          netSales,
+          expectedCash,
+          countedCash,
+          cashDifference,
+          cardSales,
+          transferSales,
+          note,
+        ]
+      );
+      const cut = rows[0];
+
+      if (saleIds.length > 0) {
+        await query('UPDATE sales SET cut_id = $1 WHERE id = ANY($2::int[])', [cut.id, saleIds]);
+      }
+
+      return sendJson(res, 201, cut);
     }
 
     return sendJson(res, 404, { error: 'Ruta API no encontrada' });
