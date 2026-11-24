@@ -7,7 +7,7 @@
   <title>Punto de Venta Carlos | Web & APK</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="styles.css?v=8" />
+  <link rel="stylesheet" href="styles.css?v=9" />
 </head>
 <body>
   <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
@@ -723,69 +723,71 @@
         <button class="modal-close" data-close="modal-close-cut">✕</button>
       </div>
       <form id="form-close-cut" class="modal-body">
-        <div class="close-cut-summary-grid">
-          <div class="close-cut-stat">
-            <span>Ventas a cerrar</span>
-            <strong id="close-cut-sales-count">0 ventas</strong>
+        <div id="close-cut-step-1-fields" style="display:flex; flex-direction:column; gap:0.8rem;">
+          <div class="close-cut-summary-grid">
+            <div class="close-cut-stat">
+              <span>Ventas a cerrar</span>
+              <strong id="close-cut-sales-count">0 ventas</strong>
+            </div>
+            <div class="close-cut-stat">
+              <span>Total Neto del Turno</span>
+              <strong id="close-cut-net-total" style="color:var(--primary);">$0.00</strong>
+            </div>
+            <div class="close-cut-stat">
+              <span>💳 Tarjeta / Transf.</span>
+              <strong id="close-cut-digital-total" style="color:var(--accent);">$0.00</strong>
+            </div>
+            <div class="close-cut-stat">
+              <span>↩️ Devoluciones</span>
+              <strong id="close-cut-refunds-total" style="color:#fca5a5;">-$0.00</strong>
+            </div>
           </div>
-          <div class="close-cut-stat">
-            <span>Total Neto del Turno</span>
-            <strong id="close-cut-net-total" style="color:var(--primary);">$0.00</strong>
-          </div>
-          <div class="close-cut-stat">
-            <span>💳 Tarjeta / Transf.</span>
-            <strong id="close-cut-digital-total" style="color:var(--accent);">$0.00</strong>
-          </div>
-          <div class="close-cut-stat">
-            <span>↩️ Devoluciones</span>
-            <strong id="close-cut-refunds-total" style="color:#fca5a5;">-$0.00</strong>
-          </div>
-        </div>
 
-        <div class="checkout-total-banner">
-          <span>💵 Efectivo Esperado en Caja</span>
-          <strong id="close-cut-expected-cash">$0.00</strong>
-        </div>
+          <div class="checkout-total-banner" style="padding:0.75rem 1rem;">
+            <span>💵 Efectivo Esperado en Caja</span>
+            <strong id="close-cut-expected-cash">$0.00</strong>
+          </div>
 
-        <div class="form-group">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
-            <label class="field-label" for="close-cut-counted-cash" style="margin:0;">💵 Efectivo Físico Contado / Entregado ($) *</label>
-            <button type="button" id="btn-close-cut-exact" class="chip-btn" style="font-size:0.76rem; padding:0.2rem 0.55rem;">
-              Usar monto exacto
+          <div class="form-group">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.3rem;">
+              <label class="field-label" for="close-cut-counted-cash" style="margin:0;">💵 Efectivo Físico Contado / Entregado ($) *</label>
+              <button type="button" id="btn-close-cut-exact" class="chip-btn" style="font-size:0.75rem; padding:0.2rem 0.55rem;">
+                Usar monto exacto
+              </button>
+            </div>
+            <input type="number" id="close-cut-counted-cash" class="input input-lg" step="0.01" min="0" placeholder="0.00" required />
+          </div>
+
+          <div id="close-cut-diff-box" class="change-box" style="margin-top:0; padding:0.65rem 0.9rem;">
+            <span>Diferencia de efectivo:</span>
+            <strong id="close-cut-diff-text" style="font-size:1.15rem;">✅ Exacto ($0.00)</strong>
+          </div>
+
+          <div class="form-group">
+            <label class="field-label" for="close-cut-note">Nota u observaciones del cierre (opcional)</label>
+            <input type="text" id="close-cut-note" class="input" placeholder="Ej. Cierre de día, efectivo entregado a administración..." />
+          </div>
+
+          <!-- Paso 1: Botones iniciales para pasar a la pregunta de confirmación -->
+          <div id="close-cut-step-1-footer" class="modal-footer" style="padding:0.65rem 0 0 0;">
+            <button type="button" class="btn btn-secondary" data-close="modal-close-cut">Cancelar</button>
+            <button type="button" id="btn-ask-close-cut" class="btn btn-success btn-lg">
+              🔒 Cerrar Turno / Día →
             </button>
           </div>
-          <input type="number" id="close-cut-counted-cash" class="input input-lg" step="0.01" min="0" placeholder="0.00" required />
         </div>
 
-        <div id="close-cut-diff-box" class="change-box">
-          <span>Diferencia de efectivo:</span>
-          <strong id="close-cut-diff-text">✅ Exacto ($0.00)</strong>
-        </div>
-
-        <div class="form-group">
-          <label class="field-label" for="close-cut-note">Nota u observaciones del cierre (opcional)</label>
-          <input type="text" id="close-cut-note" class="input" placeholder="Ej. Cierre de día, efectivo entregado a administración..." />
-        </div>
-
-        <!-- Paso 1: Botones iniciales para pasar a la pregunta de confirmación -->
-        <div id="close-cut-step-1-footer" class="modal-footer" style="padding:0.75rem 0 0 0;">
-          <button type="button" class="btn btn-secondary" data-close="modal-close-cut">Cancelar</button>
-          <button type="button" id="btn-ask-close-cut" class="btn btn-success btn-lg">
-            🔒 Cerrar Turno / Día →
-          </button>
-        </div>
-
-        <!-- Paso 2: Pregunta de Confirmación Visual dentro del Modal -->
-        <div id="close-cut-confirm-box" class="return-auth-box hidden" style="border-color:var(--danger); background:rgba(239, 68, 68, 0.12); padding:1rem;">
-          <div style="font-size:1.02rem; font-weight:800; color:#fecaca; margin-bottom:0.45rem;">
+        <!-- Paso 2: Pregunta de Confirmación Visual dentro del Modal (100% visible en pantalla) -->
+        <div id="close-cut-confirm-box" class="return-auth-box hidden" style="border-color:var(--danger); background:rgba(239, 68, 68, 0.12); padding:1.1rem;">
+          <div style="font-size:1.05rem; font-weight:800; color:#fecaca; margin-bottom:0.55rem;">
             ⚠️ ¿Estás seguro de cerrar la venta del día / turno?
           </div>
-          <p id="close-cut-confirm-detail" style="font-size:0.86rem; color:#fde68a; line-height:1.4; margin-bottom:0.85rem;"></p>
-          <div style="display:flex; justify-content:flex-end; gap:0.6rem; flex-wrap:wrap;">
-            <button type="button" id="btn-cancel-confirm-cut" class="btn btn-secondary">
+          <p id="close-cut-confirm-detail" style="font-size:0.9rem; color:#fde68a; line-height:1.45; margin-bottom:1rem;"></p>
+          <div style="display:flex; justify-content:space-between; gap:0.6rem; flex-wrap:wrap;">
+            <button type="button" id="btn-cancel-confirm-cut" class="btn btn-secondary" style="flex:1;">
               ⬅️ No, volver
             </button>
-            <button type="submit" id="btn-confirm-close-cut" class="btn btn-success btn-lg">
+            <button type="submit" id="btn-confirm-close-cut" class="btn btn-success btn-lg" style="flex:1.4;">
               ✅ Sí, confirmar y cerrar
             </button>
           </div>
@@ -822,11 +824,11 @@
           window.location.reload();
         }
       });
-      navigator.serviceWorker.register('/sw.js?v=8').then((reg) => {
+      navigator.serviceWorker.register('/sw.js?v=9').then((reg) => {
         reg.update().catch(() => {});
       }).catch(() => {});
     }
   </script>
-  <script src="app.js?v=8" type="module"></script>
+  <script src="app.js?v=9" type="module"></script>
 </body>
 </html>

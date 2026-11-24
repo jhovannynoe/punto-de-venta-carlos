@@ -2979,6 +2979,8 @@ function openCloseCutModal() {
   countedInput.value = summary.expectedCash.toFixed(2);
   document.getElementById('close-cut-note').value = '';
 
+  const step1Fields = document.getElementById('close-cut-step-1-fields');
+  if (step1Fields) step1Fields.classList.remove('hidden');
   document.getElementById('close-cut-step-1-footer').classList.remove('hidden');
   document.getElementById('close-cut-confirm-box').classList.add('hidden');
 
@@ -3585,13 +3587,18 @@ async function initApp() {
       if (diff > 0.009) diffMsg = `Sobrante de +${formatMoney(diff)}`;
       else if (diff < -0.009) diffMsg = `Faltante de -${formatMoney(Math.abs(diff))}`;
 
+      const noteVal = document.getElementById('close-cut-note').value.trim();
       document.getElementById('close-cut-confirm-detail').innerHTML =
         `Se cerrarán <strong>${activeCutDraft.salesCount} venta(s)</strong> con un Total Neto de <strong>${formatMoney(
           activeCutDraft.netSales
         )}</strong>.<br/>` +
-        `💵 Efectivo entregado: <strong>${formatMoney(countedCash)}</strong> (${diffMsg}).<br/>` +
-        `Al confirmar, se generará el comprobante de corte y la caja activa iniciará en <strong>$0.00</strong>.`;
+        `💵 Efectivo esperado: <strong>${formatMoney(activeCutDraft.expectedCash)}</strong><br/>` +
+        `💵 Efectivo entregado: <strong>${formatMoney(countedCash)}</strong> (${diffMsg}).` +
+        (noteVal ? `<br/>📝 Nota: <em>${escapeHtml(noteVal)}</em>` : '') +
+        `<br/><br/>Al confirmar, se generará el comprobante de corte y la caja activa iniciará en <strong>$0.00</strong>.`;
 
+      const step1Fields = document.getElementById('close-cut-step-1-fields');
+      if (step1Fields) step1Fields.classList.add('hidden');
       document.getElementById('close-cut-step-1-footer').classList.add('hidden');
       document.getElementById('close-cut-confirm-box').classList.remove('hidden');
     });
@@ -3601,6 +3608,8 @@ async function initApp() {
   if (btnCancelConfirmCut) {
     btnCancelConfirmCut.addEventListener('click', () => {
       document.getElementById('close-cut-confirm-box').classList.add('hidden');
+      const step1Fields = document.getElementById('close-cut-step-1-fields');
+      if (step1Fields) step1Fields.classList.remove('hidden');
       document.getElementById('close-cut-step-1-footer').classList.remove('hidden');
     });
   }
