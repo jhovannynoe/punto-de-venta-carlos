@@ -15,6 +15,7 @@ const OfflineStore = {
     SALES: 'pos_cache_sales_v1',
     CUTS: 'pos_cache_cuts_v1',
     QUEUE: 'pos_pending_sales_queue_v1',
+    LOGS: 'pos_pending_logs_v1',
   },
 
   get(key, fallback) {
@@ -202,7 +203,97 @@ async function ensureNeonSchemaDirect() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS system_logs (
+      id SERIAL PRIMARY KEY,
+      level TEXT NOT NULL DEFAULT 'info',
+      category TEXT NOT NULL DEFAULT 'general',
+      message TEXT NOT NULL,
+      details TEXT DEFAULT '',
+      cashier_name TEXT DEFAULT 'Anónimo',
+      device_info TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 }
+
+// ==========================================
+// TELEMETRÍA Y LOGS SILENCIOSOS TRAS BAMBALINAS (VIGENCIA 15 DÍAS)
+// ==========================================
+const SystemLogger = {
+  isFlushing: false,
+
+  getDeviceInfo() {
+    const ua = navigator.userAgent || '';
+    let platform = 'PC';
+    if (/iPad/i.test(ua)) platform = 'iPad';
+    else if (/iPhone/i.test(ua)) platform = 'iPhone';
+    else if (/Android/i.test(ua)) platform = /Mobile/i.test(ua) ? 'Android Phone' : 'Android Tablet';
+    const connMode = DataService.useDirectNeon ? 'DirectNeon' : 'ServerAPI';
+    return `${platform} (${window.innerWidth}x${window.innerHeight}) | online:${navigator.onLine} | mode:${connMode}`;
+  },
+
+  log(level, category, message, detailsObj = {}) {
+    try {
+      const entry = {
+        level,
+        category,
+        message,
+        details: typeof detailsObj === 'string' ? detailsObj : JSON.stringify(detailsObj || {}),
+        cashier_name: state && state.currentUser ? `${state.currentUser.name} (${state.currentUser.role})` : 'Sin sesión',
+        device_info: this.getDeviceInfo(),
+        created_at: new Date().toISOString(),
+      };
+
+      const queue = OfflineStore.get(OfflineStore.KEYS.LOGS, []);
+      queue.push(entry);
+      if (queue.length > 80) queue.splice(0, queue.length - 80);
+      OfflineStore.set(OfflineStore.KEYS.LOGS, queue);
+
+      if (navigator.onLine) {
+        this.flush();
+      }
+    } catch {
+      // Silencioso para jamás interrumpir la operación
+    }
+  },
+
+  async flush() {
+    if (this.isFlushing || !navigator.onLine) return;
+    const queue = OfflineStore.get(OfflineStore.KEYS.LOGS, []);
+    if (queue.length === 0) return;
+
+    this.isFlushing = true;
+    const batch = queue.slice(0, 25);
+    OfflineStore.set(OfflineStore.KEYS.LOGS, queue.slice(batch.length));
+
+    try {
+      if (!DataService.useDirectNeon) {
+        const res = await fetch('/api/logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entries: batch }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } else {
+        for (const e of batch) {
+          await neonQuery(
+            `INSERT INTO system_logs (level, category, message, details, cashier_name, device_info, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)`,
+            [e.level, e.category, e.message, e.details, e.cashier_name, e.device_info, e.created_at]
+          );
+        }
+        await neonQuery(`DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL '15 days';`).catch(() => {});
+      }
+    } catch {
+      const current = OfflineStore.get(OfflineStore.KEYS.LOGS, []);
+      OfflineStore.set(OfflineStore.KEYS.LOGS, [...batch, ...current].slice(-80));
+    } finally {
+      this.isFlushing = false;
+    }
+  },
+};
 
 // Capa de datos unificada con soporte Offline-First + Auto-Sync
 const DataService = {
@@ -665,16 +756,28 @@ const DataService = {
     };
 
     try {
-      if (!navigator.onLine) throw new Error('Sin conexión');
+      if (!navigator.onLine) throw new Error('navigator.onLine es false');
       const cloudSale = await this.sendSaleToCloud(fullPayload);
       this.isOffline = false;
       updateConnectionUI();
+      SystemLogger.log('info', 'sale_created', `Venta #${cloudSale.id} registrada en línea`, {
+        sale_id: cloudSale.id,
+        client_uid: fullPayload.client_uid,
+        total: fullPayload.total,
+        items_count: items.length,
+      });
       return cloudSale;
-    } catch {
+    } catch (err) {
       // Guardar venta en cola local segura sin perder nada (conservando su created_at original)
       this.isOffline = true;
       const localSale = OfflineStore.addPendingSale(fullPayload);
       updateConnectionUI();
+      SystemLogger.log('warn', 'network_fallback_offline', `Fallo al subir venta; guardada en cola offline (${localSale.id})`, {
+        reason: err && err.message ? err.message : 'Error de red desconocido',
+        client_uid: fullPayload.client_uid,
+        total: fullPayload.total,
+        items_count: items.length,
+      });
       return localSale;
     }
   },
@@ -691,15 +794,26 @@ const DataService = {
         try {
           // Retirar de la cola antes de enviar para evitar doble subida si ocurre otro evento
           OfflineStore.removePendingSale(pendingSale.id);
-          await this.sendSaleToCloud(pendingSale);
+          const syncedSale = await this.sendSaleToCloud(pendingSale);
           syncedCount++;
-        } catch {
+          SystemLogger.log('info', 'offline_sale_synced', `Venta offline ${pendingSale.id} sincronizada como Folio #${syncedSale.id}`, {
+            local_id: pendingSale.id,
+            cloud_id: syncedSale.id,
+            client_uid: pendingSale.client_uid,
+            original_created_at: pendingSale.created_at,
+            total: pendingSale.total,
+          });
+        } catch (err) {
           // Si falló la red al enviar, volver a ponerla en la cola sin perderla
           const currentQueue = OfflineStore.getPendingQueue();
           if (!currentQueue.some((s) => s.id === pendingSale.id)) {
             currentQueue.unshift(pendingSale);
             OfflineStore.set(OfflineStore.KEYS.QUEUE, currentQueue);
           }
+          SystemLogger.log('error', 'offline_sync_failed', `Fallo al intentar sincronizar venta offline ${pendingSale.id}`, {
+            reason: err && err.message ? err.message : 'Error de red',
+            client_uid: pendingSale.client_uid,
+          });
           break;
         }
       }
@@ -3300,15 +3414,32 @@ async function initApp() {
 
   // Eventos de Red (Auto-Sync cuando regresa el internet)
   window.addEventListener('online', async () => {
+    SystemLogger.log('info', 'network_status', 'Conexión a internet restablecida (evento online)');
     showToast('🌐 Conexión a internet restablecida');
     await DataService.syncPendingSales();
+    await SystemLogger.flush();
     await Promise.all([loadUsers(), loadProducts(), loadPromotions(), loadSales()]);
   });
 
   window.addEventListener('offline', () => {
     DataService.isOffline = true;
     updateConnectionUI();
+    SystemLogger.log('warn', 'network_status', 'Dispositivo perdió conexión a internet (evento offline)');
     showToast('🟠 Sin internet: Modo Offline Activado (las ventas se guardarán en el equipo)');
+  });
+
+  // Capturar errores inesperados de JavaScript o promesas rechazadas tras bambalinas
+  window.addEventListener('error', (e) => {
+    SystemLogger.log('error', 'js_runtime_error', e.message || 'Error JS', {
+      filename: e.filename,
+      lineno: e.lineno,
+      colno: e.colno,
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason = e.reason && e.reason.message ? e.reason.message : String(e.reason || 'Unhandled rejection');
+    SystemLogger.log('error', 'unhandled_promise', reason);
   });
 
   document.getElementById('btn-sync-pending').addEventListener('click', async () => {
@@ -3796,12 +3927,18 @@ async function initApp() {
 
     const selectedItems = activeReturnDraft.items.filter((it) => it.return_qty > 0);
     if (selectedItems.length === 0) {
+      SystemLogger.log('warn', 'return_validation_block', `Intento de devolución bloqueado: 0 artículos seleccionados en Folio #${activeReturnDraft.sale.id}`, {
+        sale_id: activeReturnDraft.sale.id,
+      });
       showToast('⚠️ Selecciona al menos 1 artículo/pieza para devolver');
       return;
     }
 
     const reason = document.getElementById('return-reason').value.trim();
     if (!reason) {
+      SystemLogger.log('warn', 'return_validation_block', `Intento de devolución bloqueado: sin motivo en Folio #${activeReturnDraft.sale.id}`, {
+        sale_id: activeReturnDraft.sale.id,
+      });
       showToast('⚠️ Escribe o selecciona el motivo de la devolución');
       return;
     }
@@ -3811,6 +3948,9 @@ async function initApp() {
     const adminPin = document.getElementById('return-admin-pin').value.trim();
 
     if (!isAdminSession && !adminPin) {
+      SystemLogger.log('warn', 'return_validation_block', `Intento de devolución bloqueado: cajero no ingresó PIN de Admin en Folio #${activeReturnDraft.sale.id}`, {
+        sale_id: activeReturnDraft.sale.id,
+      });
       showToast('🔒 Ingresa el PIN de un Administrador para autorizar la devolución');
       document.getElementById('return-admin-pin').focus();
       return;
@@ -3831,12 +3971,23 @@ async function initApp() {
         admin_pin: adminPin,
       });
 
+      SystemLogger.log('info', 'return_processed', `Devolución aplicada en Folio #${activeReturnDraft.sale.id} (-${refundAmount})`, {
+        sale_id: activeReturnDraft.sale.id,
+        refund_amount: refundAmount,
+        reason,
+        authorized_by: res.authorized_by_name,
+      });
+
       document.getElementById('modal-return').classList.add('hidden');
       await Promise.all([loadProducts(), loadSales()]);
       showToast(
         `↩️ Devolución aplicada (-${formatMoney(refundAmount)}) • Autorizó: ${res.authorized_by_name || 'Admin'}`
       );
     } catch (err) {
+      SystemLogger.log('error', 'return_failed', `Error al procesar devolución en Folio #${activeReturnDraft.sale.id}: ${err.message}`, {
+        sale_id: activeReturnDraft.sale.id,
+        error: err.message,
+      });
       showToast(`❌ ${err.message}`);
     } finally {
       btn.disabled = false;
@@ -3876,6 +4027,7 @@ async function initApp() {
   await DataService.init();
   await Promise.all([loadUsers(), loadProducts(), loadPromotions()]);
   await DataService.syncPendingSales();
+  await SystemLogger.flush();
   updateConnectionUI();
 }
 

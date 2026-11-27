@@ -167,6 +167,21 @@ export async function initDatabase() {
     );
   `);
 
+  // 8. Tabla de Logs de Diagnóstico tras bambalinas (auto-limpieza a 15 días)
+  await query(`
+    CREATE TABLE IF NOT EXISTS system_logs (
+      id SERIAL PRIMARY KEY,
+      level TEXT NOT NULL DEFAULT 'info',
+      category TEXT NOT NULL DEFAULT 'general',
+      message TEXT NOT NULL,
+      details TEXT DEFAULT '',
+      cashier_name TEXT DEFAULT 'Anónimo',
+      device_info TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await query(`DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL '15 days';`);
+
   // 5. Tabla de conceptos por venta
   await query(`
     CREATE TABLE IF NOT EXISTS sale_items (

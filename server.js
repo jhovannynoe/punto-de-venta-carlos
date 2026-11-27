@@ -738,6 +738,39 @@ async function handleApi(req, res, urlObj) {
       return sendJson(res, 201, cut);
     }
 
+    // LOGS DE DIAGNÓSTICO TRAS BAMBALINAS (Con vigencia automática de 15 días)
+    if (pathname === '/api/logs' && method === 'POST') {
+      const body = await parseBody(req);
+      const entries = Array.isArray(body.entries) ? body.entries : [body];
+
+      for (const entry of entries.slice(0, 50)) {
+        if (!entry || !entry.message) continue;
+        const level = String(entry.level || 'info').slice(0, 20);
+        const category = String(entry.category || 'general').slice(0, 40);
+        const message = String(entry.message || '').slice(0, 500);
+        const details =
+          typeof entry.details === 'string'
+            ? entry.details.slice(0, 2000)
+            : JSON.stringify(entry.details || {}).slice(0, 2000);
+        const cashierName = String(entry.cashier_name || 'Anónimo').slice(0, 80);
+        const deviceInfo = String(entry.device_info || '').slice(0, 250);
+        const createdAt =
+          entry.created_at && !Number.isNaN(Date.parse(entry.created_at))
+            ? new Date(entry.created_at).toISOString()
+            : new Date().toISOString();
+
+        await query(
+          `INSERT INTO system_logs (level, category, message, details, cashier_name, device_info, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)`,
+          [level, category, message, details, cashierName, deviceInfo, createdAt]
+        );
+      }
+
+      // Purga automática de registros con más de 15 días de antigüedad
+      await query(`DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL '15 days';`).catch(() => {});
+      return sendJson(res, 201, { ok: true });
+    }
+
     return sendJson(res, 404, { error: 'Ruta API no encontrada' });
   } catch (err) {
     console.error('API Error:', err);
