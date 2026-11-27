@@ -2667,7 +2667,7 @@ function openReturnModal(sale) {
         original_qty: Number(it.quantity),
         already_returned: alreadyReturned,
         available_qty: availableQty,
-        return_qty: availableQty,
+        return_qty: 0,
         unit_price_effective: effectiveUnitPaid,
         is_physical: isPhysicalProduct,
         return_to_stock: true,
@@ -2678,6 +2678,11 @@ function openReturnModal(sale) {
   if (draftItems.length === 0) {
     showToast('⚠️ Todos los artículos de esta venta ya fueron devueltos.');
     return;
+  }
+
+  // Si el ticket solo tiene 1 artículo con 1 pieza disponible, pre-seleccionarlo; si tiene más, iniciar en 0 para elegir 1 o 2 (o usar "Seleccionar Todo")
+  if (draftItems.length === 1 && draftItems[0].available_qty === 1) {
+    draftItems[0].return_qty = 1;
   }
 
   activeReturnDraft = {

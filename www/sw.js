@@ -1,9 +1,9 @@
-const CACHE_NAME = 'pos-carlos-instant-v11';
+const CACHE_NAME = 'pos-carlos-instant-v12';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
-  '/styles.css?v=11',
-  '/app.js?v=11',
+  '/styles.css?v=12',
+  '/app.js?v=12',
   '/manifest.json',
   '/icon.svg',
 ];
