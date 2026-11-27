@@ -207,6 +207,7 @@ async function ensureNeonSchemaDirect() {
 const DataService = {
   useDirectNeon: false,
   isOffline: false,
+  isSyncing: false,
 
   async init() {
     if (!navigator.onLine) {
@@ -563,14 +564,18 @@ const DataService = {
     const note = String(salePayload.note || '').trim();
     const cashierId = salePayload.cashier_id ? Number(salePayload.cashier_id) : null;
     const cashierName = String(salePayload.cashier_name || 'General').trim();
+    const createdAt =
+      salePayload.created_at && !Number.isNaN(Date.parse(salePayload.created_at))
+        ? new Date(salePayload.created_at).toISOString()
+        : new Date().toISOString();
 
     const saleRows = await neonQuery(
-      `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
        RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
                  total::float AS total, payment_method, amount_received::float AS amount_received,
                  change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
-      [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
+      [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt]
     );
     const sale = saleRows[0];
     const insertedItems = [];
@@ -626,6 +631,7 @@ const DataService = {
       total,
       amount_received: amountReceived,
       change_given: changeGiven,
+      created_at: salePayload.created_at || new Date().toISOString(),
     };
 
     try {
@@ -635,7 +641,7 @@ const DataService = {
       updateConnectionUI();
       return cloudSale;
     } catch {
-      // Guardar venta en cola local segura sin perder nada
+      // Guardar venta en cola local segura sin perder nada (conservando su created_at original)
       this.isOffline = true;
       const localSale = OfflineStore.addPendingSale(fullPayload);
       updateConnectionUI();
@@ -644,24 +650,37 @@ const DataService = {
   },
 
   async syncPendingSales() {
+    if (this.isSyncing) return 0;
     const queue = OfflineStore.getPendingQueue();
     if (queue.length === 0 || !navigator.onLine) return 0;
 
+    this.isSyncing = true;
     let syncedCount = 0;
-    for (const pendingSale of queue) {
-      try {
-        await this.sendSaleToCloud(pendingSale);
-        OfflineStore.removePendingSale(pendingSale.id);
-        syncedCount++;
-      } catch {
-        break;
+    try {
+      for (const pendingSale of queue) {
+        try {
+          // Retirar de la cola antes de enviar para evitar doble subida si ocurre otro evento
+          OfflineStore.removePendingSale(pendingSale.id);
+          await this.sendSaleToCloud(pendingSale);
+          syncedCount++;
+        } catch {
+          // Si falló la red al enviar, volver a ponerla en la cola sin perderla
+          const currentQueue = OfflineStore.getPendingQueue();
+          if (!currentQueue.some((s) => s.id === pendingSale.id)) {
+            currentQueue.unshift(pendingSale);
+            OfflineStore.set(OfflineStore.KEYS.QUEUE, currentQueue);
+          }
+          break;
+        }
       }
-    }
-    if (syncedCount > 0) {
-      this.isOffline = false;
-      updateConnectionUI();
-      await Promise.all([loadProducts(), loadSales()]);
-      showToast(`☁️ ${syncedCount} venta(s) offline sincronizada(s) con Neon`);
+      if (syncedCount > 0) {
+        this.isOffline = false;
+        updateConnectionUI();
+        await Promise.all([loadProducts(), loadSales()]);
+        showToast(`☁️ ${syncedCount} venta(s) offline sincronizada(s) con Neon`);
+      }
+    } finally {
+      this.isSyncing = false;
     }
     return syncedCount;
   },
@@ -949,9 +968,17 @@ const DataService = {
       const res = await fetch(`/api/sales/${saleId}`, { method: 'DELETE' });
       if (res.ok) return true;
     }
-    const items = await neonQuery('SELECT product_id, quantity FROM sale_items WHERE sale_id = $1', [Number(saleId)]);
+    const numId = Number(saleId);
+    const saleInfoRows = await neonQuery('SELECT id, cut_id FROM sales WHERE id = $1', [numId]);
+    const cutId = saleInfoRows[0]?.cut_id ? Number(saleInfoRows[0].cut_id) : null;
+
+    const items = await neonQuery(
+      'SELECT product_id, quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE sale_id = $1',
+      [numId]
+    );
     for (const it of items) {
-      if (it.product_id) {
+      const netSoldQty = Math.max(0, Number(it.quantity) - Number(it.returned_qty || 0));
+      if (it.product_id && netSoldQty > 0) {
         const prodRows = await neonQuery(
           'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
           [Number(it.product_id)]
@@ -960,15 +987,41 @@ const DataService = {
           const p = prodRows[0];
           if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
             const cycle = Number(p.free_after_sales) + 1;
-            const prevCounter = (Number(p.sales_counter) - Number(it.quantity) + cycle * 10) % cycle;
+            const prevCounter = (Number(p.sales_counter) - netSoldQty + cycle * 10) % cycle;
             await neonQuery('UPDATE products SET sales_counter = $1 WHERE id = $2', [prevCounter, Number(it.product_id)]);
           } else if (!p.is_service && p.stock !== null) {
-            await neonQuery('UPDATE products SET stock = stock + $1 WHERE id = $2', [Number(it.quantity), Number(it.product_id)]);
+            await neonQuery('UPDATE products SET stock = stock + $1 WHERE id = $2', [netSoldQty, Number(it.product_id)]);
           }
         }
       }
     }
-    await neonQuery('DELETE FROM sales WHERE id = $1', [Number(saleId)]);
+    await neonQuery('DELETE FROM sales WHERE id = $1', [numId]);
+
+    if (cutId) {
+      const remaining = await neonQuery(
+        `SELECT COUNT(*)::int AS cnt,
+                COALESCE(SUM(total), 0)::float AS gross,
+                COALESCE(SUM(refunded_total), 0)::float AS refunded,
+                COALESCE(SUM(GREATEST(0, total - COALESCE(refunded_total, 0))), 0)::float AS net,
+                COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS cash,
+                COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS card,
+                COALESCE(SUM(CASE WHEN payment_method = 'transferencia' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS transfer
+         FROM sales WHERE cut_id = $1`,
+        [cutId]
+      );
+      const r = remaining[0];
+      if (!r || Number(r.cnt) === 0) {
+        await neonQuery('DELETE FROM cash_cuts WHERE id = $1', [cutId]);
+      } else {
+        await neonQuery(
+          `UPDATE cash_cuts
+           SET sales_count = $1, gross_sales = $2, refunded_total = $3, net_sales = $4,
+               expected_cash = $5, counted_cash = $5, cash_difference = 0, card_sales = $6, transfer_sales = $7
+           WHERE id = $8`,
+          [r.cnt, r.gross, r.refunded, r.net, r.cash, r.card, r.transfer, cutId]
+        );
+      }
+    }
     return true;
   },
 
@@ -2519,6 +2572,10 @@ function renderSalesHistory() {
           ? `<button class="btn btn-danger btn-sm btn-open-return" data-id="${s.id}">↩️ Devolver</button>`
           : ''
         }
+            ${isAdmin
+          ? `<button class="btn btn-danger btn-sm btn-delete-sale" data-id="${s.id}" title="Eliminar folio permanentemente (Solo Admin)">🗑️ Eliminar</button>`
+          : ''
+        }
           </div>
         </div>
       `;
@@ -2538,13 +2595,31 @@ function renderSalesHistory() {
       if (sale) openReturnModal(sale);
     });
   });
+
+  listEl.querySelectorAll('.btn-delete-sale').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const sale = state.sales.find((s) => String(s.id) === String(btn.dataset.id));
+      if (!sale) return;
+      const msg =
+        `¿Estás seguro de ELIMINAR permanentemente el Folio #${sale.id} por ${formatMoney(sale.total)}?\n\n` +
+        `Esta acción borrará el registro de la base de datos y devolverá el stock de sus productos.`;
+      if (!confirm(msg)) return;
+      try {
+        await DataService.deleteSale(sale.id);
+        await Promise.all([loadProducts(), loadSales()]);
+        showToast(`🗑️ Folio #${sale.id} eliminado permanentemente`);
+      } catch (err) {
+        showToast(`❌ Error al eliminar folio: ${err.message}`);
+      }
+    });
+  });
 }
 
 function openReturnModal(sale) {
   const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const remainingSaleBalance = Math.max(0, Number(sale.total) - Number(sale.refunded_total || 0));
 
-  // Construir borrador de conceptos disponibles para devolver
+  // Construir borrador de conceptos disponibles para devolver (pre-seleccionando todos por defecto para agilizar)
   const draftItems = (sale.items || [])
     .map((it) => {
       const alreadyReturned = Number(it.returned_qty || 0);
@@ -2562,7 +2637,7 @@ function openReturnModal(sale) {
         original_qty: Number(it.quantity),
         already_returned: alreadyReturned,
         available_qty: availableQty,
-        return_qty: 0,
+        return_qty: availableQty,
         unit_price_effective: effectiveUnitPaid,
         is_physical: isPhysicalProduct,
         return_to_stock: true,
@@ -2573,11 +2648,6 @@ function openReturnModal(sale) {
   if (draftItems.length === 0) {
     showToast('⚠️ Todos los artículos de esta venta ya fueron devueltos.');
     return;
-  }
-
-  // Si el ticket solo tiene 1 artículo con 1 pieza disponible, pre-seleccionarlo para agilizar
-  if (draftItems.length === 1 && draftItems[0].available_qty === 1) {
-    draftItems[0].return_qty = 1;
   }
 
   activeReturnDraft = {
@@ -2665,6 +2735,12 @@ function renderReturnModalItems() {
 
   // Calcular reembolso proporcional sugerido
   const allSelectedFull = activeReturnDraft.items.every((it) => it.return_qty === it.available_qty);
+  const btnSelectAll = document.getElementById('btn-return-select-all');
+  if (btnSelectAll) {
+    btnSelectAll.textContent = allSelectedFull
+      ? 'Limpiar Selección (Elegir Piezas)'
+      : 'Seleccionar Todo (Devolución Total)';
+  }
   let suggestedRefund = 0;
   if (allSelectedFull) {
     suggestedRefund = activeReturnDraft.remainingSaleBalance;
@@ -3665,8 +3741,9 @@ async function initApp() {
   // Eventos del Modal de Devoluciones (Puntos 1 al 4)
   document.getElementById('btn-return-select-all').addEventListener('click', () => {
     if (!activeReturnDraft) return;
+    const allSelected = activeReturnDraft.items.every((it) => it.return_qty === it.available_qty);
     for (const item of activeReturnDraft.items) {
-      item.return_qty = item.available_qty;
+      item.return_qty = allSelected ? 0 : item.available_qty;
     }
     renderReturnModalItems();
   });

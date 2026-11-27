@@ -7,7 +7,7 @@
   <title>Punto de Venta Carlos | Web & APK</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="styles.css?v=9" />
+  <link rel="stylesheet" href="styles.css?v=10" />
 </head>
 <body>
   <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
@@ -824,11 +824,11 @@
           window.location.reload();
         }
       });
-      navigator.serviceWorker.register('/sw.js?v=9').then((reg) => {
+      navigator.serviceWorker.register('/sw.js?v=10').then((reg) => {
         reg.update().catch(() => {});
       }).catch(() => {});
     }
   </script>
-  <script src="app.js?v=9" type="module"></script>
+  <script src="app.js?v=10" type="module"></script>
 </body>
 </html>

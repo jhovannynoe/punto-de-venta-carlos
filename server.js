@@ -378,14 +378,18 @@ async function handleApi(req, res, urlObj) {
       const note = String(body.note || '').trim();
       const cashierId = body.cashier_id ? Number(body.cashier_id) : null;
       const cashierName = String(body.cashier_name || 'General').trim() || 'General';
+      const createdAt =
+        body.created_at && !Number.isNaN(Date.parse(body.created_at))
+          ? new Date(body.created_at).toISOString()
+          : new Date().toISOString();
 
       const saleRows = await query(
-        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, status, refunded_total)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'completada', 0)
+        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, status, refunded_total, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'completada', 0, $11::timestamptz)
          RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
                    total::float AS total, payment_method, amount_received::float AS amount_received,
                    change_given::float AS change_given, note, cashier_id, cashier_name, status, refunded_total::float AS refunded_total, created_at`,
-        [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName]
+        [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt]
       );
       const sale = saleRows[0];
 
@@ -552,9 +556,13 @@ async function handleApi(req, res, urlObj) {
     const saleMatch = pathname.match(/^\/api\/sales\/(\d+)$/);
     if (saleMatch && method === 'DELETE') {
       const saleId = Number(saleMatch[1]);
-      const items = await query('SELECT product_id, quantity FROM sale_items WHERE sale_id = $1', [saleId]);
+      const saleInfoRows = await query('SELECT id, cut_id FROM sales WHERE id = $1', [saleId]);
+      const cutId = saleInfoRows[0]?.cut_id ? Number(saleInfoRows[0].cut_id) : null;
+
+      const items = await query('SELECT product_id, quantity, COALESCE(returned_qty, 0) AS returned_qty FROM sale_items WHERE sale_id = $1', [saleId]);
       for (const it of items) {
-        if (it.product_id) {
+        const netSoldQty = Math.max(0, Number(it.quantity) - Number(it.returned_qty || 0));
+        if (it.product_id && netSoldQty > 0) {
           const prodRows = await query(
             'SELECT product_type, is_service, stock, free_after_sales, COALESCE(sales_counter, 0) AS sales_counter FROM products WHERE id = $1',
             [it.product_id]
@@ -563,15 +571,42 @@ async function handleApi(req, res, urlObj) {
             const p = prodRows[0];
             if (p.product_type === 'servicio_especial' && p.free_after_sales > 0) {
               const cycle = Number(p.free_after_sales) + 1;
-              const prevCounter = (Number(p.sales_counter) - Number(it.quantity) + cycle * 10) % cycle;
+              const prevCounter = (Number(p.sales_counter) - netSoldQty + cycle * 10) % cycle;
               await query('UPDATE products SET sales_counter = $1 WHERE id = $2', [prevCounter, it.product_id]);
             } else if (!p.is_service && p.stock !== null) {
-              await query('UPDATE products SET stock = stock + $1 WHERE id = $2', [it.quantity, it.product_id]);
+              await query('UPDATE products SET stock = stock + $1 WHERE id = $2', [netSoldQty, it.product_id]);
             }
           }
         }
       }
       await query('DELETE FROM sales WHERE id = $1', [saleId]);
+
+      if (cutId) {
+        const remaining = await query(
+          `SELECT COUNT(*)::int AS cnt,
+                  COALESCE(SUM(total), 0)::float AS gross,
+                  COALESCE(SUM(refunded_total), 0)::float AS refunded,
+                  COALESCE(SUM(GREATEST(0, total - COALESCE(refunded_total, 0))), 0)::float AS net,
+                  COALESCE(SUM(CASE WHEN payment_method = 'efectivo' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS cash,
+                  COALESCE(SUM(CASE WHEN payment_method = 'tarjeta' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS card,
+                  COALESCE(SUM(CASE WHEN payment_method = 'transferencia' THEN GREATEST(0, total - COALESCE(refunded_total, 0)) ELSE 0 END), 0)::float AS transfer
+           FROM sales WHERE cut_id = $1`,
+          [cutId]
+        );
+        const r = remaining[0];
+        if (!r || Number(r.cnt) === 0) {
+          await query('DELETE FROM cash_cuts WHERE id = $1', [cutId]);
+        } else {
+          await query(
+            `UPDATE cash_cuts
+             SET sales_count = $1, gross_sales = $2, refunded_total = $3, net_sales = $4,
+                 expected_cash = $5, counted_cash = $5, cash_difference = 0, card_sales = $6, transfer_sales = $7
+             WHERE id = $8`,
+            [r.cnt, r.gross, r.refunded, r.net, r.cash, r.card, r.transfer, cutId]
+          );
+        }
+      }
+
       return sendJson(res, 200, { ok: true });
     }
 
