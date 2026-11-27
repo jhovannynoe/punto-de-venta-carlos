@@ -378,18 +378,44 @@ async function handleApi(req, res, urlObj) {
       const note = String(body.note || '').trim();
       const cashierId = body.cashier_id ? Number(body.cashier_id) : null;
       const cashierName = String(body.cashier_name || 'General').trim() || 'General';
+      const clientUid = body.client_uid ? String(body.client_uid).trim() : null;
       const createdAt =
         body.created_at && !Number.isNaN(Date.parse(body.created_at))
           ? new Date(body.created_at).toISOString()
           : new Date().toISOString();
 
+      // Candado de idempotencia en BD: si ya se insertó este client_uid, no duplicar el ticket
+      if (clientUid) {
+        const existingRows = await query(
+          `SELECT id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
+                  total::float AS total, payment_method, amount_received::float AS amount_received,
+                  change_given::float AS change_given, note, cashier_id, cashier_name, status,
+                  refunded_total::float AS refunded_total, created_at
+           FROM sales WHERE client_uid = $1 LIMIT 1`,
+          [clientUid]
+        );
+        if (existingRows.length > 0) {
+          const existingItems = await query(
+            `SELECT id, sale_id, product_id, product_name, quantity, returned_qty,
+                    unit_price::float AS unit_price, subtotal::float AS subtotal, is_free_reward
+             FROM sale_items WHERE sale_id = $1 ORDER BY id ASC`,
+            [existingRows[0].id]
+          );
+          if (existingItems.length > 0) {
+            return sendJson(res, 200, { ...existingRows[0], items: existingItems, returns: [] });
+          }
+          // Si la venta quedó a medias sin sus items por corte de red, limpiar el encabezado incompleto antes de reinsertar
+          await query('DELETE FROM sales WHERE id = $1', [existingRows[0].id]);
+        }
+      }
+
       const saleRows = await query(
-        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, status, refunded_total, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'completada', 0, $11::timestamptz)
+        `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, status, refunded_total, created_at, client_uid)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'completada', 0, $11::timestamptz, $12)
          RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
                    total::float AS total, payment_method, amount_received::float AS amount_received,
                    change_given::float AS change_given, note, cashier_id, cashier_name, status, refunded_total::float AS refunded_total, created_at`,
-        [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt]
+        [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt, clientUid]
       );
       const sale = saleRows[0];
 

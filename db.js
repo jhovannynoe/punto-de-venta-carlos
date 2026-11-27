@@ -145,6 +145,7 @@ export async function initDatabase() {
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
   await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cut_id INTEGER DEFAULT NULL;`);
+  await query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_uid TEXT DEFAULT NULL;`);
 
   // 7. Tabla de Cortes de Caja / Cierres de Turno
   await query(`

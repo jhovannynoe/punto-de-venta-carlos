@@ -153,6 +153,7 @@ async function ensureNeonSchemaDirect() {
   await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completada';`);
   await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
   await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS cut_id INTEGER DEFAULT NULL;`);
+  await neonQuery(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_uid TEXT DEFAULT NULL;`);
 
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS cash_cuts (
@@ -208,6 +209,7 @@ const DataService = {
   useDirectNeon: false,
   isOffline: false,
   isSyncing: false,
+  isCreatingSale: false,
 
   async init() {
     if (!navigator.onLine) {
@@ -564,18 +566,43 @@ const DataService = {
     const note = String(salePayload.note || '').trim();
     const cashierId = salePayload.cashier_id ? Number(salePayload.cashier_id) : null;
     const cashierName = String(salePayload.cashier_name || 'General').trim();
+    const clientUid = salePayload.client_uid ? String(salePayload.client_uid).trim() : null;
     const createdAt =
       salePayload.created_at && !Number.isNaN(Date.parse(salePayload.created_at))
         ? new Date(salePayload.created_at).toISOString()
         : new Date().toISOString();
 
+    if (clientUid) {
+      await ensureNeonSchemaDirect();
+      const existingRows = await neonQuery(
+        `SELECT id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
+                total::float AS total, payment_method, amount_received::float AS amount_received,
+                change_given::float AS change_given, note, cashier_id, cashier_name, created_at
+         FROM sales WHERE client_uid = $1 LIMIT 1`,
+        [clientUid]
+      );
+      if (existingRows.length > 0) {
+        const existingItems = await neonQuery(
+          `SELECT id, sale_id, product_id, product_name, quantity,
+                  unit_price::float AS unit_price, subtotal::float AS subtotal, is_free_reward
+           FROM sale_items WHERE sale_id = $1 ORDER BY id ASC`,
+          [existingRows[0].id]
+        );
+        if (existingItems.length === items.length && existingItems.length > 0) {
+          return { ...existingRows[0], items: existingItems };
+        }
+        // Si una venta anterior quedó truncada a mitad de camino por caída de red, limpiarla antes de reinsertar
+        await neonQuery('DELETE FROM sales WHERE id = $1', [existingRows[0].id]);
+      }
+    }
+
     const saleRows = await neonQuery(
-      `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
+      `INSERT INTO sales (subtotal, discount_total, promo_summary, total, payment_method, amount_received, change_given, note, cashier_id, cashier_name, created_at, client_uid)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, $12)
        RETURNING id, subtotal::float AS subtotal, discount_total::float AS discount_total, promo_summary,
                  total::float AS total, payment_method, amount_received::float AS amount_received,
                  change_given::float AS change_given, note, cashier_id, cashier_name, created_at`,
-      [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt]
+      [subtotal, discountTotal, promoSummary, total, paymentMethod, amountReceived, changeGiven, note, cashierId, cashierName, createdAt, clientUid]
     );
     const sale = saleRows[0];
     const insertedItems = [];
@@ -632,6 +659,9 @@ const DataService = {
       amount_received: amountReceived,
       change_given: changeGiven,
       created_at: salePayload.created_at || new Date().toISOString(),
+      client_uid:
+        salePayload.client_uid ||
+        `UID-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     };
 
     try {
