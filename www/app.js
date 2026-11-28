@@ -96,6 +96,24 @@ async function neonQuery(sqlText, params = []) {
   return data.rows || [];
 }
 
+// Petición a Render con timeout corto (1.8s): si Render se durmió tras 15 min de inactividad,
+// no congela la pantalla 30s sino que despierta Render en segundo plano y salta directo a Neon Cloud.
+async function apiFetch(url, options = {}, timeoutMs = 1800) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    // Despertar Render silenciosamente para siguientes peticiones y activar Neon Directo al instante
+    fetch('/api/health').catch(() => {});
+    DataService.useDirectNeon = true;
+    throw err;
+  }
+}
+
 async function ensureNeonSchemaDirect() {
   await neonQuery(`
     CREATE TABLE IF NOT EXISTS users (
@@ -356,9 +374,18 @@ const DataService = {
     try {
       let rows;
       if (!this.useDirectNeon) {
-        const res = await fetch('/api/users');
-        if (!res.ok) throw new Error('API offline');
-        rows = await res.json();
+        try {
+          const res = await apiFetch('/api/users');
+          if (!res.ok) throw new Error('API offline');
+          rows = await res.json();
+        } catch {
+          rows = await neonQuery(`
+            SELECT id, name, role, pin, created_at
+            FROM users
+            WHERE active = TRUE
+            ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name ASC
+          `);
+        }
       } else {
         rows = await neonQuery(`
           SELECT id, name, role, pin, created_at
@@ -380,16 +407,39 @@ const DataService = {
 
   async verifyPin(userId, pin) {
     const cleanPin = String(pin).trim();
+    if (!cleanPin) throw new Error('PIN incorrecto');
+
+    // 1. Si ya tenemos el usuario y su PIN en caché local (sincronizado al abrir), validar en 0ms sin esperar a Render
+    const cachedUsers = OfflineStore.get(OfflineStore.KEYS.USERS, []);
+    const cachedMatch = cachedUsers.find((u) => Number(u.id) === Number(userId) && u.pin !== undefined);
+    if (cachedMatch) {
+      if (String(cachedMatch.pin) === cleanPin) {
+        return { id: cachedMatch.id, name: cachedMatch.name, role: cachedMatch.role };
+      }
+      // Si no coincidió con el caché local, verificar contra Neon por si el Admin cambió el PIN recientemente
+    }
+
     try {
       if (!this.isOffline) {
         if (!this.useDirectNeon) {
-          const res = await fetch('/api/auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId, pin: cleanPin }),
-          });
-          if (res.ok) return res.json();
-          if (res.status === 401) throw new Error('PIN_INVALID');
+          try {
+            const res = await apiFetch('/api/auth', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_id: userId, pin: cleanPin }),
+            }, 1500);
+            if (res.ok) return res.json();
+            if (res.status === 401) throw new Error('PIN_INVALID');
+          } catch (apiErr) {
+            if (apiErr.message === 'PIN_INVALID') throw apiErr;
+            // Si Render tardó >1.5s, validar directo en Neon Cloud al instante
+            const rows = await neonQuery(
+              'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
+              [Number(userId), cleanPin]
+            );
+            if (rows.length === 0) throw new Error('PIN_INVALID');
+            return rows[0];
+          }
         } else {
           const rows = await neonQuery(
             'SELECT id, name, role FROM users WHERE id = $1 AND pin = $2 AND active = TRUE',
@@ -406,12 +456,12 @@ const DataService = {
     }
 
     // Verificación offline contra el caché local de usuarios
-    const cachedUsers = OfflineStore.get(OfflineStore.KEYS.USERS, [
+    const fallbackUsers = OfflineStore.get(OfflineStore.KEYS.USERS, [
       { id: 1, name: 'Administrador', role: 'admin', pin: '1234' },
       { id: 2, name: 'Cajero 1', role: 'cajero', pin: '1111' },
       { id: 3, name: 'Cajero 2', role: 'cajero', pin: '2222' },
     ]);
-    const match = cachedUsers.find((u) => Number(u.id) === Number(userId) && String(u.pin) === cleanPin);
+    const match = fallbackUsers.find((u) => Number(u.id) === Number(userId) && String(u.pin) === cleanPin);
     if (!match) throw new Error('PIN incorrecto');
     return { id: match.id, name: match.name, role: match.role };
   },
@@ -419,14 +469,18 @@ const DataService = {
   async saveUser(userObj) {
     const role = userObj.role === 'admin' ? 'admin' : 'cajero';
     if (!this.useDirectNeon) {
-      const url = userObj.id ? `/api/users/${userObj.id}` : '/api/users';
-      const method = userObj.id ? 'PUT' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...userObj, role }),
-      });
-      if (res.ok) return res.json();
+      try {
+        const url = userObj.id ? `/api/users/${userObj.id}` : '/api/users';
+        const method = userObj.id ? 'PUT' : 'POST';
+        const res = await apiFetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...userObj, role }),
+        });
+        if (res.ok) return res.json();
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     if (userObj.id) {
       const rows = await neonQuery(
@@ -445,8 +499,12 @@ const DataService = {
 
   async deleteUser(id) {
     if (!this.useDirectNeon) {
-      const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
-      if (res.ok) return true;
+      try {
+        const res = await apiFetch(`/api/users/${id}`, { method: 'DELETE' });
+        if (res.ok) return true;
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     await neonQuery('UPDATE users SET active = FALSE WHERE id = $1', [Number(id)]);
     return true;
@@ -456,9 +514,20 @@ const DataService = {
     try {
       let rows;
       if (!this.useDirectNeon) {
-        const res = await fetch('/api/products');
-        if (!res.ok) throw new Error('Offline');
-        rows = await res.json();
+        try {
+          const res = await apiFetch('/api/products');
+          if (!res.ok) throw new Error('Offline');
+          rows = await res.json();
+        } catch {
+          rows = await neonQuery(`
+            SELECT id, name, category, price::float AS price, stock, is_service,
+                   COALESCE(product_type, CASE WHEN is_service THEN 'servicio' ELSE 'producto' END) AS product_type,
+                   free_after_sales, COALESCE(sales_counter, 0) AS sales_counter, created_at
+            FROM products
+            WHERE active = TRUE
+            ORDER BY category ASC, name ASC
+          `);
+        }
       } else {
         rows = await neonQuery(`
           SELECT id, name, category, price::float AS price, stock, is_service,
@@ -510,14 +579,18 @@ const DataService = {
     };
 
     if (!this.useDirectNeon) {
-      const url = prod.id ? `/api/products/${prod.id}` : '/api/products';
-      const method = prod.id ? 'PUT' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) return res.json();
+      try {
+        const url = prod.id ? `/api/products/${prod.id}` : '/api/products';
+        const method = prod.id ? 'PUT' : 'POST';
+        const res = await apiFetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) return res.json();
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     if (prod.id) {
       const rows = await neonQuery(
@@ -561,8 +634,12 @@ const DataService = {
 
   async deleteProduct(id) {
     if (!this.useDirectNeon) {
-      const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
-      if (res.ok) return true;
+      try {
+        const res = await apiFetch(`/api/products/${id}`, { method: 'DELETE' });
+        if (res.ok) return true;
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     await neonQuery('UPDATE products SET active = FALSE WHERE id = $1', [Number(id)]);
     return true;
@@ -572,9 +649,22 @@ const DataService = {
     try {
       let rows;
       if (!this.useDirectNeon) {
-        const res = await fetch('/api/promotions');
-        if (!res.ok) throw new Error('Offline');
-        rows = await res.json();
+        try {
+          const res = await apiFetch('/api/promotions');
+          if (!res.ok) throw new Error('Offline');
+          rows = await res.json();
+        } catch {
+          rows = await neonQuery(`
+            SELECT pr.id, pr.name, pr.product_a_id, pr.product_b_id,
+                   pr.discount_amount::float AS discount_amount, pr.active,
+                   pa.name AS product_a_name, pb.name AS product_b_name
+            FROM promotions pr
+            LEFT JOIN products pa ON pa.id = pr.product_a_id
+            LEFT JOIN products pb ON pb.id = pr.product_b_id
+            WHERE pr.active = TRUE
+            ORDER BY pr.id DESC
+          `);
+        }
       } else {
         rows = await neonQuery(`
           SELECT pr.id, pr.name, pr.product_a_id, pr.product_b_id,
@@ -597,14 +687,18 @@ const DataService = {
 
   async savePromotion(promo) {
     if (!this.useDirectNeon) {
-      const url = promo.id ? `/api/promotions/${promo.id}` : '/api/promotions';
-      const method = promo.id ? 'PUT' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(promo),
-      });
-      if (res.ok) return res.json();
+      try {
+        const url = promo.id ? `/api/promotions/${promo.id}` : '/api/promotions';
+        const method = promo.id ? 'PUT' : 'POST';
+        const res = await apiFetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(promo),
+        });
+        if (res.ok) return res.json();
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     if (promo.id) {
       const rows = await neonQuery(
@@ -628,8 +722,12 @@ const DataService = {
 
   async deletePromotion(id) {
     if (!this.useDirectNeon) {
-      const res = await fetch(`/api/promotions/${id}`, { method: 'DELETE' });
-      if (res.ok) return true;
+      try {
+        const res = await apiFetch(`/api/promotions/${id}`, { method: 'DELETE' });
+        if (res.ok) return true;
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
     }
     await neonQuery('UPDATE promotions SET active = FALSE WHERE id = $1', [Number(id)]);
     return true;
@@ -637,13 +735,16 @@ const DataService = {
 
   async sendSaleToCloud(salePayload) {
     if (!this.useDirectNeon) {
-      const res = await fetch('/api/sales', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(salePayload),
-      });
-      if (res.ok) return res.json();
-      throw new Error('Servidor no disponible');
+      try {
+        const res = await apiFetch('/api/sales', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(salePayload),
+        }, 2200);
+        if (res.ok) return res.json();
+      } catch {
+        // Si Render estaba dormido (>2.2s), guardar directo en Neon Cloud sin mandar a cola Offline
+      }
     }
 
     const items = salePayload.items || [];
@@ -984,16 +1085,23 @@ const DataService = {
     }
 
     if (!this.useDirectNeon) {
-      const res = await fetch(`/api/sales/${saleId}/return`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || 'Error al procesar la devolución');
+      try {
+        const res = await apiFetch(`/api/sales/${saleId}/return`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }, 2200);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || 'Error al procesar la devolución');
+        }
+        return data;
+      } catch (apiErr) {
+        if (apiErr.message && !apiErr.message.includes('aborted') && !apiErr.message.includes('fetch')) {
+          throw apiErr;
+        }
+        // Si fue timeout porque Render dormía, continuar abajo con Direct Neon
       }
-      return data;
     }
 
     // Modo Directo Neon (APK / Serverless)
@@ -1603,9 +1711,18 @@ function recalculateCartPromotions() {
 // ==========================================
 // PANTALLA DE LOGIN Y CONTROL DE PERMISOS
 // ==========================================
-function renderLoginScreen() {
+function renderLoginScreen(preserveActivePinPad = false) {
   const grid = document.getElementById('login-users-grid');
   const pinForm = document.getElementById('form-login-pin');
+
+  // Si el usuario ya había tocado su nombre y tiene abierto el teclado de PIN, NO cerrárselo cuando loadUsers() responda en segundo plano
+  if (preserveActivePinPad && state.selectedLoginUser && !pinForm.classList.contains('hidden')) {
+    const updatedUser = state.users.find((u) => Number(u.id) === Number(state.selectedLoginUser.id));
+    if (updatedUser) {
+      state.selectedLoginUser = updatedUser;
+    }
+    return;
+  }
 
   grid.classList.remove('hidden');
   pinForm.classList.add('hidden');
@@ -3365,7 +3482,7 @@ function openProductModal(prod = null) {
 // Carga de datos desde Neon o Caché Local
 async function loadUsers() {
   state.users = await DataService.getUsers();
-  renderLoginScreen();
+  renderLoginScreen(true);
   if (state.currentUser && state.currentUser.role === 'admin') {
     renderCashierFilterDropdown();
   }
@@ -3497,10 +3614,23 @@ async function initApp() {
     }
   });
 
+  let isLoggingIn = false;
   document.getElementById('form-login-pin').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!state.selectedLoginUser) return;
+    if (!state.selectedLoginUser || isLoggingIn) return;
     const pin = document.getElementById('login-pin-input').value.trim();
+    if (!pin) {
+      showToast('⚠️ Ingresa tu PIN con los números en pantalla');
+      return;
+    }
+
+    isLoggingIn = true;
+    const enterBtn = document.querySelector('#form-login-pin .key-enter');
+    if (enterBtn) {
+      enterBtn.disabled = true;
+      enterBtn.textContent = 'Entrando...';
+    }
+
     try {
       const verifiedUser = await DataService.verifyPin(state.selectedLoginUser.id, pin);
       state.currentUser = verifiedUser;
@@ -3510,8 +3640,15 @@ async function initApp() {
       await loadSales();
       showToast(`👋 Bienvenido, ${verifiedUser.name}`);
     } catch {
+      SystemLogger.log('warn', 'login_pin_failed', `Intento de login con PIN incorrecto para usuario ${state.selectedLoginUser.name}`);
       showToast('❌ PIN incorrecto, intenta de nuevo');
       document.getElementById('login-pin-input').value = '';
+    } finally {
+      isLoggingIn = false;
+      if (enterBtn) {
+        enterBtn.disabled = false;
+        enterBtn.textContent = 'Entrar →';
+      }
     }
   });
 
@@ -3681,22 +3818,35 @@ async function initApp() {
 
   document.getElementById('form-product').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const pType = document.getElementById('prod-type').value;
-    const payload = {
-      id: document.getElementById('prod-id').value || null,
-      name: document.getElementById('prod-name').value.trim(),
-      category: document.getElementById('prod-category').value.trim() || 'General',
-      price: Number(document.getElementById('prod-price').value || 0),
-      product_type: pType,
-      is_service: pType !== 'producto',
-      stock: document.getElementById('prod-stock').value,
-      free_after_sales: document.getElementById('prod-free-after').value,
-      sales_counter: document.getElementById('prod-sales-counter').value,
-    };
-    await DataService.saveProduct(payload);
-    document.getElementById('modal-product').classList.add('hidden');
-    await loadProducts();
-    showToast('✅ Catálogo actualizado en Neon');
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    if (submitBtn && submitBtn.disabled) return;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Guardando...';
+    }
+    try {
+      const pType = document.getElementById('prod-type').value;
+      const payload = {
+        id: document.getElementById('prod-id').value || null,
+        name: document.getElementById('prod-name').value.trim(),
+        category: document.getElementById('prod-category').value.trim() || 'General',
+        price: Number(document.getElementById('prod-price').value || 0),
+        product_type: pType,
+        is_service: pType !== 'producto',
+        stock: document.getElementById('prod-stock').value,
+        free_after_sales: document.getElementById('prod-free-after').value,
+        sales_counter: document.getElementById('prod-sales-counter').value,
+      };
+      await DataService.saveProduct(payload);
+      document.getElementById('modal-product').classList.add('hidden');
+      await loadProducts();
+      showToast('✅ Catálogo actualizado en Neon');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Guardar en Neon';
+      }
+    }
   });
 
   // Admin: Crear / Editar Promoción (A + B)
@@ -3704,18 +3854,31 @@ async function initApp() {
 
   document.getElementById('form-promo').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const payload = {
-      id: document.getElementById('promo-id').value || null,
-      name: document.getElementById('promo-name').value.trim(),
-      product_a_id: Number(document.getElementById('promo-prod-a').value),
-      product_b_id: Number(document.getElementById('promo-prod-b').value),
-      discount_amount: Number(document.getElementById('promo-discount').value || 10),
-    };
-    await DataService.savePromotion(payload);
-    document.getElementById('modal-promo').classList.add('hidden');
-    await loadPromotions();
-    renderPromosTable();
-    showToast('✅ Promoción guardada en Neon');
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    if (submitBtn && submitBtn.disabled) return;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Guardando...';
+    }
+    try {
+      const payload = {
+        id: document.getElementById('promo-id').value || null,
+        name: document.getElementById('promo-name').value.trim(),
+        product_a_id: Number(document.getElementById('promo-prod-a').value),
+        product_b_id: Number(document.getElementById('promo-prod-b').value),
+        discount_amount: Number(document.getElementById('promo-discount').value || 10),
+      };
+      await DataService.savePromotion(payload);
+      document.getElementById('modal-promo').classList.add('hidden');
+      await loadPromotions();
+      renderPromosTable();
+      showToast('✅ Promoción guardada en Neon');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Guardar Promoción';
+      }
+    }
   });
 
   // Admin: Crear / Editar Cajero
@@ -3723,17 +3886,30 @@ async function initApp() {
 
   document.getElementById('form-cashier').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const payload = {
-      id: document.getElementById('cashier-id').value || null,
-      name: document.getElementById('cashier-name').value.trim(),
-      role: document.getElementById('cashier-role').value,
-      pin: document.getElementById('cashier-pin').value.trim(),
-    };
-    await DataService.saveUser(payload);
-    document.getElementById('modal-cashier').classList.add('hidden');
-    await loadUsers();
-    renderCashiersTable();
-    showToast('✅ Usuario guardado en Neon');
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    if (submitBtn && submitBtn.disabled) return;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Guardando...';
+    }
+    try {
+      const payload = {
+        id: document.getElementById('cashier-id').value || null,
+        name: document.getElementById('cashier-name').value.trim(),
+        role: document.getElementById('cashier-role').value,
+        pin: document.getElementById('cashier-pin').value.trim(),
+      };
+      await DataService.saveUser(payload);
+      document.getElementById('modal-cashier').classList.add('hidden');
+      await loadUsers();
+      renderCashiersTable();
+      showToast('✅ Usuario guardado en Neon');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Guardar Usuario';
+      }
+    }
   });
 
   // Historial, Periodos (Día, Semana, Mes, 24 Meses, Rango) y Corte
