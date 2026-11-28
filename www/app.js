@@ -14,6 +14,7 @@ const OfflineStore = {
     PROMOS: 'pos_cache_promos_v1',
     SALES: 'pos_cache_sales_v1',
     CUTS: 'pos_cache_cuts_v1',
+    EXPENSES: 'pos_cache_expenses_v1',
     QUEUE: 'pos_pending_sales_queue_v1',
     LOGS: 'pos_pending_logs_v1',
   },
@@ -234,6 +235,47 @@ async function ensureNeonSchemaDirect() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS recurring_expenses (
+      id SERIAL PRIMARY KEY,
+      concept TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'estacionamiento',
+      amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS recurring_expense_skips (
+      id SERIAL PRIMARY KEY,
+      recurring_id INTEGER NOT NULL REFERENCES recurring_expenses(id) ON DELETE CASCADE,
+      skip_date DATE NOT NULL,
+      skipped_by TEXT DEFAULT 'General',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(recurring_id, skip_date)
+    );
+  `);
+
+  await neonQuery(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      concept TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'snack',
+      amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      expense_date DATE NOT NULL DEFAULT (NOW() AT TIME ZONE 'America/Mexico_City')::date,
+      cashier_id INTEGER,
+      cashier_name TEXT DEFAULT 'General',
+      cut_id INTEGER DEFAULT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await neonQuery(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_snack NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await neonQuery(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_parking NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await neonQuery(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await neonQuery(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS free_money NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
 }
 
 // ==========================================
@@ -1282,26 +1324,35 @@ const DataService = {
     const endParam = endDateStr || startParam;
     try {
       if (!this.useDirectNeon) {
-        const params = new URLSearchParams();
-        if (startParam) params.set('start_date', startParam);
-        if (endParam) params.set('end_date', endParam);
-        if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
-        const res = await fetch(`/api/cash-cuts?${params.toString()}`);
-        if (res.ok) {
-          const rows = await res.json();
-          OfflineStore.set(OfflineStore.KEYS.CUTS, rows);
-          return rows;
+        try {
+          const params = new URLSearchParams();
+          if (startParam) params.set('start_date', startParam);
+          if (endParam) params.set('end_date', endParam);
+          if (cashierId && cashierId !== 'all') params.set('cashier_id', cashierId);
+          const res = await apiFetch(`/api/cash-cuts?${params.toString()}`);
+          if (res.ok) {
+            const rows = await res.json();
+            OfflineStore.set(OfflineStore.KEYS.CUTS, rows);
+            return rows;
+          }
+        } catch {
+          // Fallback inmediato a Neon Directo
         }
       }
       await ensureNeonSchemaDirect();
       let rows;
-      if (startParam && endParam && cashierId && cashierId !== 'all') {
+      if (startParam && endDateStr && cashierId && cashierId !== 'all') {
         rows = await neonQuery(
           `SELECT id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                  transfer_sales::float AS transfer_sales, note, created_at
+                  transfer_sales::float AS transfer_sales,
+                  COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                  COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                  COALESCE(expenses_total, 0)::float AS expenses_total,
+                  COALESCE(free_money, net_sales)::float AS free_money,
+                  note, created_at
            FROM cash_cuts
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -1315,7 +1366,12 @@ const DataService = {
                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                  transfer_sales::float AS transfer_sales, note, created_at
+                  transfer_sales::float AS transfer_sales,
+                  COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                  COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                  COALESCE(expenses_total, 0)::float AS expenses_total,
+                  COALESCE(free_money, net_sales)::float AS free_money,
+                  note, created_at
            FROM cash_cuts
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -1333,12 +1389,16 @@ const DataService = {
   async createCashCut(payload) {
     try {
       if (!this.useDirectNeon) {
-        const res = await fetch('/api/cash-cuts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) return res.json();
+        try {
+          const res = await apiFetch('/api/cash-cuts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (res.ok) return res.json();
+        } catch {
+          // Fallback inmediato a Neon Directo
+        }
       }
       await ensureNeonSchemaDirect();
       const cashierId = payload.cashier_id ? Number(payload.cashier_id) : null;
@@ -1352,6 +1412,10 @@ const DataService = {
       const cashDifference = Number((countedCash - expectedCash).toFixed(2));
       const cardSales = Number(payload.card_sales || 0);
       const transferSales = Number(payload.transfer_sales || 0);
+      const expensesSnack = Number(payload.expenses_snack || 0);
+      const expensesParking = Number(payload.expenses_parking || 0);
+      const expensesTotal = Number(payload.expenses_total ?? expensesSnack + expensesParking);
+      const freeMoney = Number(payload.free_money ?? netSales - expensesTotal);
       const note = String(payload.note || '').trim();
       const saleIds = Array.isArray(payload.sale_ids)
         ? payload.sale_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
@@ -1360,14 +1424,20 @@ const DataService = {
       const rows = await neonQuery(
         `INSERT INTO cash_cuts (
            cashier_id, cashier_name, sales_count, gross_sales, refunded_total,
-           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales, note
+           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales,
+           expenses_snack, expenses_parking, expenses_total, free_money, note
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          RETURNING id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
                    refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                    expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                    cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                   transfer_sales::float AS transfer_sales, note, created_at`,
+                   transfer_sales::float AS transfer_sales,
+                   COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                   COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                   COALESCE(expenses_total, 0)::float AS expenses_total,
+                   COALESCE(free_money, net_sales)::float AS free_money,
+                   note, created_at`,
         [
           cashierId,
           cashierName,
@@ -1380,6 +1450,10 @@ const DataService = {
           cashDifference,
           cardSales,
           transferSales,
+          expensesSnack,
+          expensesParking,
+          expensesTotal,
+          freeMoney,
           note,
         ]
       );
@@ -1400,6 +1474,168 @@ const DataService = {
       OfflineStore.set(OfflineStore.KEYS.CUTS, cuts);
       return localCut;
     }
+  },
+
+  async getExpensesData(startDateStr, endDateStr) {
+    const startParam = startDateStr || getTodayLocalISO();
+    const endParam = endDateStr || startParam;
+    const fallback = OfflineStore.get(OfflineStore.KEYS.EXPENSES, { punctual: [], recurring: [], skips: [] });
+    try {
+      if (!this.useDirectNeon) {
+        try {
+          const params = new URLSearchParams({ start_date: startParam, end_date: endParam });
+          const res = await apiFetch(`/api/expenses?${params.toString()}`);
+          if (res.ok) {
+            const data = await res.json();
+            OfflineStore.set(OfflineStore.KEYS.EXPENSES, data);
+            return data;
+          }
+        } catch {
+          // Fallback a Neon Directo
+        }
+      }
+      await ensureNeonSchemaDirect();
+      const [punctual, recurring, skips] = await Promise.all([
+        neonQuery(
+          `SELECT id, concept, category, amount::float AS amount,
+                  expense_date::text AS expense_date, cashier_id, cashier_name, cut_id, created_at
+           FROM expenses
+           WHERE expense_date >= $1::date AND expense_date <= $2::date
+           ORDER BY expense_date DESC, created_at DESC`,
+          [startParam, endParam]
+        ),
+        neonQuery(
+          `SELECT id, concept, category, amount::float AS amount, active,
+                  (created_at AT TIME ZONE 'America/Mexico_City')::date::text AS start_date, created_at
+           FROM recurring_expenses
+           WHERE active = TRUE
+           ORDER BY id ASC`
+        ),
+        neonQuery(
+          `SELECT id, recurring_id, skip_date::text AS skip_date, skipped_by, created_at
+           FROM recurring_expense_skips
+           WHERE skip_date >= $1::date AND skip_date <= $2::date`,
+          [startParam, endParam]
+        ),
+      ]);
+      const data = { punctual, recurring, skips };
+      OfflineStore.set(OfflineStore.KEYS.EXPENSES, data);
+      return data;
+    } catch {
+      return fallback;
+    }
+  },
+
+  async saveExpense(payload) {
+    const expenseType = payload.expense_type === 'recurrente' ? 'recurrente' : 'puntual';
+    const concept = String(payload.concept || '').trim();
+    const category = payload.category === 'estacionamiento' ? 'estacionamiento' : 'snack';
+    const amount = Number(payload.amount || 0);
+    const expenseDate = payload.expense_date || getTodayLocalISO();
+    const cashierId = payload.cashier_id ? Number(payload.cashier_id) : null;
+    const cashierName = String(payload.cashier_name || 'General').trim();
+
+    if (!this.useDirectNeon) {
+      try {
+        const res = await apiFetch('/api/expenses', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            expense_type: expenseType,
+            concept,
+            category,
+            amount,
+            expense_date: expenseDate,
+            cashier_id: cashierId,
+            cashier_name: cashierName,
+          }),
+        });
+        if (res.ok) return res.json();
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
+    }
+    await ensureNeonSchemaDirect();
+    if (expenseType === 'recurrente') {
+      const rows = await neonQuery(
+        `INSERT INTO recurring_expenses (concept, category, amount, active)
+         VALUES ($1, $2, $3, TRUE)
+         RETURNING id, concept, category, amount::float AS amount, active,
+                   (created_at AT TIME ZONE 'America/Mexico_City')::date::text AS start_date, created_at`,
+        [concept, category, amount]
+      );
+      return { type: 'recurrente', item: rows[0] };
+    } else {
+      const rows = await neonQuery(
+        `INSERT INTO expenses (concept, category, amount, expense_date, cashier_id, cashier_name)
+         VALUES ($1, $2, $3, $4::date, $5, $6)
+         RETURNING id, concept, category, amount::float AS amount,
+                   expense_date::text AS expense_date, cashier_id, cashier_name, cut_id, created_at`,
+        [concept, category, amount, expenseDate, cashierId, cashierName]
+      );
+      return { type: 'puntual', item: rows[0] };
+    }
+  },
+
+  async toggleRecurringExpenseSkip(recurringId, skipDate, skip, skippedBy) {
+    if (!this.useDirectNeon) {
+      try {
+        const res = await apiFetch('/api/expenses/recurring-skip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recurring_id: Number(recurringId),
+            skip_date: skipDate,
+            skip: Boolean(skip),
+            skipped_by: skippedBy,
+          }),
+        });
+        if (res.ok) return res.json();
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
+    }
+    await ensureNeonSchemaDirect();
+    if (skip) {
+      await neonQuery(
+        `INSERT INTO recurring_expense_skips (recurring_id, skip_date, skipped_by)
+         VALUES ($1, $2::date, $3)
+         ON CONFLICT (recurring_id, skip_date) DO NOTHING`,
+        [Number(recurringId), skipDate, skippedBy]
+      );
+    } else {
+      await neonQuery(
+        `DELETE FROM recurring_expense_skips WHERE recurring_id = $1 AND skip_date = $2::date`,
+        [Number(recurringId), skipDate]
+      );
+    }
+    return { ok: true };
+  },
+
+  async deleteExpense(id) {
+    if (!this.useDirectNeon) {
+      try {
+        const res = await apiFetch(`/api/expenses/${id}`, { method: 'DELETE' });
+        if (res.ok) return true;
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
+    }
+    await neonQuery('DELETE FROM expenses WHERE id = $1', [Number(id)]);
+    return true;
+  },
+
+  async deleteRecurringExpense(id) {
+    if (!this.useDirectNeon) {
+      try {
+        const res = await apiFetch(`/api/expenses/recurring/${id}`, { method: 'DELETE' });
+        if (res.ok) return true;
+      } catch {
+        // Fallback inmediato a Neon Directo
+      }
+    }
+    await neonQuery('UPDATE recurring_expenses SET active = FALSE WHERE id = $1', [Number(id)]);
+    return true;
   },
 };
 
@@ -1436,6 +1672,7 @@ const state = {
   cart: [],
   sales: [],
   cashCuts: [],
+  expensesData: { punctual: [], recurring: [], skips: [] },
   showAllDaySalesInHistory: false,
   selectedCategory: 'Todos',
   collapsedCategories: {},
@@ -2499,6 +2736,119 @@ function syncHistoryPeriodInputs() {
   if (customBox) customBox.classList.toggle('hidden', mode !== 'custom_range');
 }
 
+// ==========================================
+// CÁLCULO DE GASTOS (RECURRENTES CON OPCIÓN A QUITAR UN DÍA + PUNTUALES DIARIOS)
+// ==========================================
+function getCalendarDaysInRange(startDateStr, endDateStr) {
+  const todayStr = getTodayLocalISO();
+  const effectiveEnd = endDateStr > todayStr ? todayStr : endDateStr;
+  if (startDateStr > effectiveEnd) return [startDateStr];
+
+  const days = [];
+  const [sy, sm, sd] = startDateStr.split('-').map(Number);
+  const [ey, em, ed] = effectiveEnd.split('-').map(Number);
+  const curr = new Date(sy, sm - 1, sd);
+  const endObj = new Date(ey, em - 1, ed);
+
+  let guard = 0;
+  while (curr <= endObj && guard < 800) {
+    days.push(toLocalISODate(curr));
+    curr.setDate(curr.getDate() + 1);
+    guard++;
+  }
+  return days;
+}
+
+function computeExpensesForDateRange(startDateStr, endDateStr) {
+  const expData = state.expensesData || { punctual: [], recurring: [], skips: [] };
+  const punctualList = expData.punctual || [];
+  const recurringList = expData.recurring || [];
+  const skipsList = expData.skips || [];
+
+  const skipSet = new Set(skipsList.map((sk) => `${sk.recurring_id}_${sk.skip_date.slice(0, 10)}`));
+  const days = getCalendarDaysInRange(startDateStr, endDateStr);
+
+  const effectiveEntries = [];
+  let snackTotal = 0;
+  let parkingTotal = 0;
+  let snackCount = 0;
+  let parkingCount = 0;
+
+  // 1. Expandir gastos recurrentes por cada día del rango (excepto días quitados/omitidos)
+  for (const rec of recurringList) {
+    if (!rec.active) continue;
+    const recStart = (rec.start_date || startDateStr).slice(0, 10);
+    const cat = rec.category === 'estacionamiento' ? 'estacionamiento' : 'snack';
+    const amt = Number(rec.amount || 0);
+
+    for (const dayStr of days) {
+      if (dayStr < recStart) continue;
+      const isSkipped = skipSet.has(`${rec.id}_${dayStr}`);
+      if (!isSkipped) {
+        if (cat === 'snack') {
+          snackTotal += amt;
+          snackCount++;
+        } else {
+          parkingTotal += amt;
+          parkingCount++;
+        }
+      }
+      effectiveEntries.push({
+        uid: `rec-${rec.id}-${dayStr}`,
+        is_recurring: true,
+        recurring_id: rec.id,
+        id: rec.id,
+        concept: rec.concept,
+        category: cat,
+        amount: isSkipped ? 0 : amt,
+        original_amount: amt,
+        is_skipped: isSkipped,
+        expense_date: dayStr,
+        cashier_name: '🔄 Recurrente Diario',
+      });
+    }
+  }
+
+  // 2. Sumar gastos diarios puntuales
+  for (const p of punctualList) {
+    const dayStr = (p.expense_date || startDateStr).slice(0, 10);
+    if (dayStr < startDateStr || dayStr > endDateStr) continue;
+    const cat = p.category === 'estacionamiento' ? 'estacionamiento' : 'snack';
+    const amt = Number(p.amount || 0);
+    if (cat === 'snack') {
+      snackTotal += amt;
+      snackCount++;
+    } else {
+      parkingTotal += amt;
+      parkingCount++;
+    }
+    effectiveEntries.push({
+      uid: `punc-${p.id}`,
+      is_recurring: false,
+      id: p.id,
+      concept: p.concept,
+      category: cat,
+      amount: amt,
+      original_amount: amt,
+      is_skipped: false,
+      expense_date: dayStr,
+      cashier_name: p.cashier_name || 'General',
+    });
+  }
+
+  effectiveEntries.sort((a, b) => b.expense_date.localeCompare(a.expense_date));
+
+  return {
+    snackTotal,
+    parkingTotal,
+    totalExpenses: snackTotal + parkingTotal,
+    snackCount,
+    parkingCount,
+    entries: effectiveEntries,
+    skipSet,
+  };
+}
+
 function renderSalesHistory() {
   const isAdmin = state.currentUser && state.currentUser.role === 'admin';
   const listEl = document.getElementById('sales-history-list');
@@ -2562,6 +2912,11 @@ function renderSalesHistory() {
     0
   );
 
+  // Calcular gastos del periodo y Dinero Libre (Dinero en Caja - Gastos Snack - Gastos Estacionamiento)
+  const expSummary = computeExpensesForDateRange(rangeInfo.startDate, rangeInfo.endDate);
+  const freeMoneyTotal = netSales - expSummary.totalExpenses;
+  const freeCashHand = cashSalesNet - expSummary.totalExpenses;
+
   document.getElementById('kpi-total-sales').textContent = formatMoney(netSales);
   document.getElementById('kpi-sales-count').textContent =
     totalRefunded > 0
@@ -2574,6 +2929,28 @@ function renderSalesHistory() {
   const kpiRetCountEl = document.getElementById('kpi-returns-count');
   if (kpiRetTotalEl) kpiRetTotalEl.textContent = `-${formatMoney(totalRefunded)}`;
   if (kpiRetCountEl) kpiRetCountEl.textContent = `${returnsCount} devolución(es) en vista`;
+
+  const kpiSnackEl = document.getElementById('kpi-expenses-snack');
+  const kpiSnackSubEl = document.getElementById('kpi-expenses-snack-sub');
+  const kpiParkingEl = document.getElementById('kpi-expenses-parking');
+  const kpiParkingSubEl = document.getElementById('kpi-expenses-parking-sub');
+  const kpiFreeMoneyEl = document.getElementById('kpi-free-money-total');
+  const kpiFreeCashEl = document.getElementById('kpi-free-cash-hand');
+
+  if (kpiSnackEl) kpiSnackEl.textContent = `-${formatMoney(expSummary.snackTotal)}`;
+  if (kpiSnackSubEl) kpiSnackSubEl.textContent = `${expSummary.snackCount} cargo(s) de snack`;
+  if (kpiParkingEl) kpiParkingEl.textContent = `-${formatMoney(expSummary.parkingTotal)}`;
+  if (kpiParkingSubEl) kpiParkingSubEl.textContent = `${expSummary.parkingCount} cargo(s) de estacionamiento`;
+  if (kpiFreeMoneyEl) {
+    kpiFreeMoneyEl.textContent = formatMoney(freeMoneyTotal);
+    kpiFreeMoneyEl.style.color = freeMoneyTotal < 0 ? '#fca5a5' : '#34d399';
+  }
+  if (kpiFreeCashEl) {
+    kpiFreeCashEl.textContent = formatMoney(freeCashHand);
+    kpiFreeCashEl.style.color = freeCashHand < 0 ? '#fca5a5' : '#93c5fd';
+  }
+
+  renderExpensesSection(rangeInfo, expSummary, isAdmin);
 
   // Renderizar tabla de Cortes Cerrados en el periodo
   const closedCutsBox = document.getElementById('closed-cuts-box');
@@ -2597,15 +2974,19 @@ function renderSalesHistory() {
           } else if (diff < -0.009) {
             diffHtml = `<span style="color:#fca5a5; font-weight:700;">🔴 Faltante -${formatMoney(Math.abs(diff))}</span>`;
           }
+          const cSnack = Number(c.expenses_snack || 0);
+          const cParking = Number(c.expenses_parking || 0);
+          const cFree = Number(c.free_money ?? Number(c.net_sales) - cSnack - cParking);
           return `
             <tr>
-              <td><strong>🔒 Corte #${c.id}</strong><div style="font-size:0.75rem; color:var(--text-muted);">🕒 ${timeLabel}</div></td>
+              <td><strong>🔒 Corte #${c.id}</strong><div style="font-size:0.75rem; color:var(--text-muted);">🕒 ${timeLabel} (${c.sales_count} vta)</div></td>
               <td><strong>🧑‍💼 ${escapeHtml(c.cashier_name)}</strong>${c.note ? `<div style="font-size:0.75rem; color:var(--text-muted);">Nota: ${escapeHtml(c.note)}</div>` : ''}</td>
-              <td>${c.sales_count} venta(s)</td>
-              <td>${formatMoney(c.expected_cash)}</td>
+              <td><strong style="color:var(--primary);">${formatMoney(c.net_sales)}</strong></td>
+              <td style="color:#fcd34d;">-${formatMoney(cSnack)}</td>
+              <td style="color:#f9a8d4;">-${formatMoney(cParking)}</td>
+              <td><strong style="color:var(--success);">${formatMoney(cFree)}</strong></td>
               <td><strong>${formatMoney(c.counted_cash)}</strong></td>
               <td>${diffHtml}</td>
-              <td><strong style="color:var(--primary);">${formatMoney(c.net_sales)}</strong></td>
               <td>
                 <button type="button" class="btn btn-secondary btn-sm btn-print-closed-cut" data-cut-id="${c.id}">
                   🧾 Ver / Imprimir
@@ -2625,7 +3006,7 @@ function renderSalesHistory() {
     }
   }
 
-  // Tabla de Resumen Agrupado por Periodo (Por Mes / Por Semana / Por Día) cuando es vista multi-día
+  // Tabla de Resumen Agrupado por Periodo (Por Mes / Por Semana / Por Día) con Gastos Snack, Estacionamiento y Dinero Libre
   const periodSummaryBox = document.getElementById('period-summary-box');
   if (periodSummaryBox) {
     periodSummaryBox.classList.toggle('hidden', !rangeInfo.isMultiDay);
@@ -2644,36 +3025,45 @@ function renderSalesHistory() {
       for (const s of state.sales) {
         const b = getSalePeriodBucket(s.created_at, groupBy);
         if (!byBucket[b.key]) {
-          byBucket[b.key] = { label: b.label, count: 0, cash: 0, digital: 0, refunded: 0, net: 0 };
+          byBucket[b.key] = { label: b.label, count: 0, net: 0, expSnack: 0, expParking: 0 };
         }
         const saleRefund = Number(s.refunded_total || 0);
         const saleNet = Math.max(0, Number(s.total) - saleRefund);
         byBucket[b.key].count += 1;
-        byBucket[b.key].refunded += saleRefund;
         byBucket[b.key].net += saleNet;
-        if (s.payment_method === 'efectivo') {
-          byBucket[b.key].cash += saleNet;
+      }
+
+      // Agregar gastos (recurrentes activos y puntuales) a su cubo de fecha correspondiente
+      for (const exp of expSummary.entries) {
+        if (exp.is_skipped) continue;
+        const b = getSalePeriodBucket(`${exp.expense_date}T12:00:00`, groupBy);
+        if (!byBucket[b.key]) {
+          byBucket[b.key] = { label: b.label, count: 0, net: 0, expSnack: 0, expParking: 0 };
+        }
+        if (exp.category === 'snack') {
+          byBucket[b.key].expSnack += Number(exp.amount || 0);
         } else {
-          byBucket[b.key].digital += saleNet;
+          byBucket[b.key].expParking += Number(exp.amount || 0);
         }
       }
 
       const bucketKeys = Object.keys(byBucket).sort((a, b) => b.localeCompare(a));
       const periodTbody = document.getElementById('period-summary-tbody');
       if (bucketKeys.length === 0) {
-        periodTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin ventas registradas en este periodo</td></tr>`;
+        periodTbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Sin movimientos registrados en este periodo</td></tr>`;
       } else {
         periodTbody.innerHTML = bucketKeys
           .map((k) => {
             const row = byBucket[k];
+            const freeRow = row.net - row.expSnack - row.expParking;
             return `
               <tr>
                 <td><strong>${escapeHtml(row.label)}</strong></td>
                 <td>${row.count} venta(s)</td>
-                <td><strong>${formatMoney(row.cash)}</strong></td>
-                <td>${formatMoney(row.digital)}</td>
-                <td style="color:#fca5a5;">${row.refunded > 0 ? `-${formatMoney(row.refunded)}` : '$0.00'}</td>
-                <td><strong style="color:var(--success)">${formatMoney(row.net)}</strong></td>
+                <td><strong style="color:var(--primary);">${formatMoney(row.net)}</strong></td>
+                <td style="color:#fcd34d;">-${formatMoney(row.expSnack)}</td>
+                <td style="color:#f9a8d4;">-${formatMoney(row.expParking)}</td>
+                <td><strong style="color:${freeRow < 0 ? '#fca5a5' : 'var(--success)'};">${formatMoney(freeRow)}</strong></td>
               </tr>
             `;
           })
@@ -3114,6 +3504,146 @@ function showSaleTicketModal(sale) {
   document.getElementById('modal-receipt').classList.remove('hidden');
 }
 
+function renderExpensesSection(rangeInfo, expSummary, isAdmin) {
+  const recBar = document.getElementById('recurring-expenses-bar');
+  const tbody = document.getElementById('expenses-table-tbody');
+  if (!recBar || !tbody) return;
+
+  const recurringList = (state.expensesData && state.expensesData.recurring) || [];
+  const activeDayStr = rangeInfo.startDate;
+
+  if (recurringList.length === 0) {
+    recBar.innerHTML = `<div style="font-size:0.82rem; color:var(--text-muted);">No hay gastos diarios recurrentes configurados (Ej. Sueldo del tendero). Puedes agregar uno con "+ Nuevo Gasto".</div>`;
+  } else {
+    recBar.innerHTML = recurringList
+      .map((rec) => {
+        const catLabel = rec.category === 'estacionamiento' ? '🚗 Estacionamiento' : '🍿 Snack';
+        const isSkippedOnActiveDay = expSummary.skipSet.has(`${rec.id}_${activeDayStr}`);
+        const dayActionBtn = !rangeInfo.isMultiDay
+          ? `<button type="button" class="btn btn-sm ${isSkippedOnActiveDay ? 'btn-primary' : 'btn-secondary'} btn-toggle-rec-skip" data-rec-id="${rec.id}" data-date="${activeDayStr}" data-skip="${!isSkippedOnActiveDay}">
+               ${isSkippedOnActiveDay ? `↩️ Reactivar el ${activeDayStr}` : `🚫 Quitar el ${activeDayStr} (No acudió)`}
+             </button>`
+          : `<span style="font-size:0.76rem; color:var(--text-muted);">Selecciona "Por Día" para quitar un día específico</span>`;
+
+        const adminDelRecBtn = isAdmin
+          ? `<button type="button" class="btn btn-danger btn-sm btn-del-rec-template" data-rec-id="${rec.id}" title="Eliminar gasto recurrente permanentemente (Solo Admin)">🗑️ Eliminar Recurrente</button>`
+          : '';
+
+        return `
+          <div class="recurring-exp-item ${!rangeInfo.isMultiDay && isSkippedOnActiveDay ? 'skipped' : ''}">
+            <div style="display:flex; align-items:center; gap:0.55rem; flex-wrap:wrap;">
+              <strong>🔄 ${escapeHtml(rec.concept)}</strong>
+              <span class="exp-cat-badge ${rec.category}">${catLabel}</span>
+              <strong style="color:#fcd34d;">-${formatMoney(rec.amount)} / día</strong>
+              ${
+                !rangeInfo.isMultiDay && isSkippedOnActiveDay
+                  ? `<span class="sale-badge devuelta_parcial">⏸️ OMITIDO ESTE DÍA ($0.00)</span>`
+                  : `<span class="sale-badge efectivo">✅ ACTIVO</span>`
+              }
+            </div>
+            <div style="display:flex; align-items:center; gap:0.45rem; flex-wrap:wrap;">
+              ${dayActionBtn}
+              ${adminDelRecBtn}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    recBar.querySelectorAll('.btn-toggle-rec-skip').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const recId = Number(btn.dataset.recId);
+        const dateStr = btn.dataset.date;
+        const shouldSkip = btn.dataset.skip === 'true';
+        const userName = state.currentUser ? state.currentUser.name : 'General';
+        await DataService.toggleRecurringExpenseSkip(recId, dateStr, shouldSkip, userName);
+        await loadSales();
+        showToast(shouldSkip ? `🚫 Gasto recurrente quitado para el día ${dateStr}` : `✅ Gasto recurrente reactivado para el día ${dateStr}`);
+      });
+    });
+
+    recBar.querySelectorAll('.btn-del-rec-template').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const recId = Number(btn.dataset.recId);
+        const rec = recurringList.find((r) => Number(r.id) === recId);
+        if (!rec) return;
+        if (!confirm(`¿Eliminar permanentemente el gasto recurrente "${rec.concept}" (${formatMoney(rec.amount)}/día)?`)) return;
+        btn.disabled = true;
+        await DataService.deleteRecurringExpense(recId);
+        await loadSales();
+        showToast(`🗑️ Gasto recurrente "${rec.concept}" eliminado`);
+      });
+    });
+  }
+
+  if (expSummary.entries.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:1.25rem; color:var(--text-muted);">No hay gastos registrados en este periodo.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = expSummary.entries
+    .map((e) => {
+      const catLabel = e.category === 'estacionamiento' ? '🚗 Estacionamiento' : '🍿 Snack';
+      const typeTag = e.is_recurring
+        ? `<span class="sale-badge tarjeta">🔄 Recurrente</span>`
+        : `<span class="sale-badge transferencia">🛒 Puntual</span>`;
+
+      let actionHtml = '<span style="color:var(--text-muted); font-size:0.78rem;">—</span>';
+      if (e.is_recurring) {
+        actionHtml = `
+          <button type="button" class="btn btn-sm ${e.is_skipped ? 'btn-primary' : 'btn-secondary'} btn-row-rec-skip" data-rec-id="${e.recurring_id}" data-date="${e.expense_date}" data-skip="${!e.is_skipped}">
+            ${e.is_skipped ? '↩️ Reactivar día' : '🚫 Quitar este día'}
+          </button>
+        `;
+      } else if (isAdmin) {
+        actionHtml = `
+          <button type="button" class="btn btn-danger btn-sm btn-del-punctual-exp" data-exp-id="${e.id}" title="Eliminar gasto (Solo Admin)">
+            🗑️ Eliminar
+          </button>
+        `;
+      }
+
+      return `
+        <tr style="${e.is_skipped ? 'opacity:0.55; text-decoration:line-through;' : ''}">
+          <td><strong>📅 ${escapeHtml(e.expense_date)}</strong><div style="margin-top:3px;">${typeTag}</div></td>
+          <td><strong>${escapeHtml(e.concept)}</strong></td>
+          <td><span class="exp-cat-badge ${e.category}">${catLabel}</span></td>
+          <td>${escapeHtml(e.cashier_name)}</td>
+          <td><strong style="color:${e.is_skipped ? 'var(--text-muted)' : '#fca5a5'};">${e.is_skipped ? '$0.00 (Omitido)' : `-${formatMoney(e.amount)}`}</strong></td>
+          <td>${actionHtml}</td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  tbody.querySelectorAll('.btn-row-rec-skip').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const recId = Number(btn.dataset.recId);
+      const dateStr = btn.dataset.date;
+      const shouldSkip = btn.dataset.skip === 'true';
+      const userName = state.currentUser ? state.currentUser.name : 'General';
+      await DataService.toggleRecurringExpenseSkip(recId, dateStr, shouldSkip, userName);
+      await loadSales();
+      showToast(shouldSkip ? `🚫 Gasto recurrente quitado el ${dateStr}` : `✅ Gasto recurrente reactivado el ${dateStr}`);
+    });
+  });
+
+  tbody.querySelectorAll('.btn-del-punctual-exp').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const expId = Number(btn.dataset.expId);
+      const exp = expSummary.entries.find((x) => !x.is_recurring && Number(x.id) === expId);
+      if (!exp) return;
+      if (!confirm(`¿Estás seguro de ELIMINAR el gasto "${exp.concept}" por -${formatMoney(exp.amount)} del día ${exp.expense_date}?`)) return;
+      btn.disabled = true;
+      await DataService.deleteExpense(expId);
+      await loadSales();
+      showToast(`🗑️ Gasto "${exp.concept}" eliminado`);
+    });
+  });
+}
+
 function showDailyCorteModal() {
   const rangeInfo = getActiveHistoryDateRange();
   const grossSales = state.sales.reduce((sum, s) => sum + Number(s.total), 0);
@@ -3130,6 +3660,10 @@ function showDailyCorteModal() {
     .filter((s) => s.payment_method === 'transferencia')
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
 
+  const expSummary = computeExpensesForDateRange(rangeInfo.startDate, rangeInfo.endDate);
+  const freeMoneyTotal = netSales - expSummary.totalExpenses;
+  const freeCashInHand = cashSales - expSummary.totalExpenses;
+
   const allReturns = [];
   for (const s of state.sales) {
     for (const r of s.returns || []) {
@@ -3144,35 +3678,22 @@ function showDailyCorteModal() {
     ? 'Todos los Cajeros (General)'
     : `Cajero filtrado`;
 
-  let periodBreakdownPrintHtml = '';
-  if (rangeInfo.isMultiDay && state.sales.length > 0) {
-    const groupBy = state.periodGroupBy || 'month';
-    const byBucket = {};
-    for (const s of state.sales) {
-      const b = getSalePeriodBucket(s.created_at, groupBy);
-      if (!byBucket[b.key]) {
-        byBucket[b.key] = { label: b.label, count: 0, net: 0 };
-      }
-      const saleNet = Math.max(0, Number(s.total) - Number(s.refunded_total || 0));
-      byBucket[b.key].count += 1;
-      byBucket[b.key].net += saleNet;
-    }
-    const keys = Object.keys(byBucket).sort((a, b) => b.localeCompare(a));
-    periodBreakdownPrintHtml = `
-      <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px; font-size:0.82rem;">
-        <strong>DESGLOSE POR PERIODO:</strong>
-        ${keys
-          .map(
-            (k) => `
-          <div style="display:flex; justify-content:space-between; margin:3px 0;">
-            <span>${escapeHtml(byBucket[k].label)} (${byBucket[k].count} vta):</span>
-            <strong>${formatMoney(byBucket[k].net)}</strong>
-          </div>`
-          )
-          .join('')}
-      </div>
-    `;
-  }
+  const activeExpensesList = expSummary.entries.filter((e) => !e.is_skipped);
+  const expensesDetailHtml =
+    activeExpensesList.length > 0
+      ? `<div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px; font-size:0.8rem;">
+           <strong>DETALLE DE GASTOS (${activeExpensesList.length}):</strong>
+           ${activeExpensesList
+             .map(
+               (e) =>
+                 `<div style="display:flex; justify-content:space-between; margin-top:3px;">
+                    <span>• [${e.category.toUpperCase()}] ${escapeHtml(e.concept)} (${e.expense_date}):</span>
+                    <strong>-${formatMoney(e.amount)}</strong>
+                  </div>`
+             )
+             .join('')}
+         </div>`
+      : '';
 
   const returnsDetailHtml =
     allReturns.length > 0
@@ -3195,10 +3716,10 @@ function showDailyCorteModal() {
   document.getElementById('receipt-title').textContent = `Reporte / Corte (${rangeInfo.label})`;
   document.getElementById('receipt-content').innerHTML = `
     <div style="text-align:center; border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
-      <h3 style="margin:0;">REPORTE Y CORTE DE VENTAS</h3>
+      <h3 style="margin:0;">REPORTE Y CORTE DE CAJA</h3>
       <div>Periodo: <strong>${escapeHtml(rangeInfo.label)}</strong></div>
       <div>Alcance: <strong>${escapeHtml(scopeLabel)}</strong></div>
-      <div>Operaciones: <strong>${state.sales.length}</strong></div>
+      <div>Operaciones de Venta: <strong>${state.sales.length}</strong></div>
     </div>
     <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
@@ -3209,42 +3730,59 @@ function showDailyCorteModal() {
         <span>↩️ Devoluciones (${allReturns.length}):</span>
         <strong>-${formatMoney(totalRefunded)}</strong>
       </div>
-    </div>
-    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>💵 Efectivo Neto en Caja:</span>
+        <span>💵 Efectivo Ventas:</span>
         <strong>${formatMoney(cashSales)}</strong>
       </div>
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>💳 Tarjeta Neto:</span>
-        <strong>${formatMoney(cardSales)}</strong>
+        <span>💳 Tarjeta / Transferencia:</span>
+        <strong>${formatMoney(cardSales + transferSales)}</strong>
       </div>
-      <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>📲 Transferencia Neto:</span>
-        <strong>${formatMoney(transferSales)}</strong>
+      <div style="display:flex; justify-content:space-between; margin:6px 0 2px 0; font-weight:bold;">
+        <span>DINERO EN CAJA (VENTAS NETAS):</span>
+        <span>${formatMoney(netSales)}</span>
       </div>
     </div>
-    ${periodBreakdownPrintHtml}
+    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>🍿 (-) Gastos de Snack:</span>
+        <strong>-${formatMoney(expSummary.snackTotal)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>🚗 (-) Gastos de Estacionamiento:</span>
+        <strong>-${formatMoney(expSummary.parkingTotal)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>Total Gastos Descontados:</span>
+        <strong>-${formatMoney(expSummary.totalExpenses)}</strong>
+      </div>
+    </div>
+    ${expensesDetailHtml}
     ${returnsDetailHtml}
-    <div style="display:flex; justify-content:space-between; font-size:1.15rem; font-weight:bold;">
-      <span>TOTAL NETO:</span>
-      <span>${formatMoney(netSales)}</span>
+    <div style="display:flex; justify-content:space-between; font-size:1.15rem; font-weight:bold; margin-bottom:4px;">
+      <span>(=) TOTAL DINERO LIBRE:</span>
+      <span>${formatMoney(freeMoneyTotal)}</span>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:0.95rem;">
+      <span>💵 Efectivo Libre en Mano:</span>
+      <strong>${formatMoney(freeCashInHand)}</strong>
     </div>
   `;
   document.getElementById('modal-receipt').classList.remove('hidden');
 }
 
 // ==========================================
-// CIERRE FORMAL DE VENTA DEL DÍA / TURNO (CON CONFIRMACIÓN)
+// CIERRE FORMAL DE VENTA DEL DÍA / TURNO (CON GASTOS Y DINERO LIBRE)
 // ==========================================
 let activeCutDraft = null;
 
 function getOpenShiftSummary() {
+  const rangeInfo = getActiveHistoryDateRange();
   const openSales = state.sales.filter((s) => !s.cut_id);
   const grossSales = openSales.reduce((sum, s) => sum + Number(s.total), 0);
   const refundedTotal = openSales.reduce((sum, s) => sum + Number(s.refunded_total || 0), 0);
   const netSales = Math.max(0, grossSales - refundedTotal);
-  const expectedCash = openSales
+  const salesCash = openSales
     .filter((s) => s.payment_method === 'efectivo')
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
   const cardSales = openSales
@@ -3254,6 +3792,13 @@ function getOpenShiftSummary() {
     .filter((s) => s.payment_method === 'transferencia')
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.refunded_total || 0)), 0);
 
+  const expSummary = computeExpensesForDateRange(rangeInfo.startDate, rangeInfo.endDate);
+  const expensesSnack = expSummary.snackTotal;
+  const expensesParking = expSummary.parkingTotal;
+  const expensesTotal = expSummary.totalExpenses;
+  const freeMoney = netSales - expensesTotal;
+  const expectedCash = salesCash - expensesTotal;
+
   return {
     openSales,
     saleIds: openSales.map((s) => Number(s.id)).filter((id) => Number.isInteger(id) && id > 0),
@@ -3261,10 +3806,15 @@ function getOpenShiftSummary() {
     grossSales,
     refundedTotal,
     netSales,
+    salesCash,
     expectedCash,
     cardSales,
     transferSales,
     digitalTotal: cardSales + transferSales,
+    expensesSnack,
+    expensesParking,
+    expensesTotal,
+    freeMoney,
   };
 }
 
@@ -3313,12 +3863,18 @@ function openCloseCutModal() {
   document.getElementById('close-cut-subtitle').textContent = `Responsable: ${scopeName}`;
   document.getElementById('close-cut-sales-count').textContent = `${summary.salesCount} venta(s)`;
   document.getElementById('close-cut-net-total').textContent = formatMoney(summary.netSales);
+  const snackEl = document.getElementById('close-cut-exp-snack');
+  const parkingEl = document.getElementById('close-cut-exp-parking');
+  const freeEl = document.getElementById('close-cut-free-money');
+  if (snackEl) snackEl.textContent = `-${formatMoney(summary.expensesSnack)}`;
+  if (parkingEl) parkingEl.textContent = `-${formatMoney(summary.expensesParking)}`;
+  if (freeEl) freeEl.textContent = formatMoney(summary.freeMoney);
   document.getElementById('close-cut-digital-total').textContent = formatMoney(summary.digitalTotal);
   document.getElementById('close-cut-refunds-total').textContent = `-${formatMoney(summary.refundedTotal)}`;
   document.getElementById('close-cut-expected-cash').textContent = formatMoney(summary.expectedCash);
 
   const countedInput = document.getElementById('close-cut-counted-cash');
-  countedInput.value = summary.expectedCash.toFixed(2);
+  countedInput.value = Math.max(0, summary.expectedCash).toFixed(2);
   document.getElementById('close-cut-note').value = '';
 
   const step1Fields = document.getElementById('close-cut-step-1-fields');
@@ -3336,6 +3892,11 @@ function showClosedCutTicketModal(cut) {
   let diffLabel = 'EXACTO ($0.00)';
   if (diff > 0.009) diffLabel = `SOBRANTE (+${formatMoney(diff)})`;
   else if (diff < -0.009) diffLabel = `FALTANTE (-${formatMoney(Math.abs(diff))})`;
+
+  const expSnack = Number(cut.expenses_snack || 0);
+  const expParking = Number(cut.expenses_parking || 0);
+  const expTotal = Number(cut.expenses_total ?? expSnack + expParking);
+  const freeMoney = Number(cut.free_money ?? Number(cut.net_sales) - expTotal);
 
   document.getElementById('receipt-title').textContent = `Comprobante de Cierre #${cut.id}`;
   document.getElementById('receipt-content').innerHTML = `
@@ -3358,9 +3919,23 @@ function showClosedCutTicketModal(cut) {
         <span>↩️ Devoluciones:</span>
         <strong>-${formatMoney(cut.refunded_total)}</strong>
       </div>
-      <div style="display:flex; justify-content:space-between; margin:4px 0; font-size:1.05rem;">
-        <span>TOTAL NETO VENDIDO:</span>
+      <div style="display:flex; justify-content:space-between; margin:4px 0; font-size:1.02rem;">
+        <span>DINERO EN CAJA (VENTAS NETAS):</span>
         <strong>${formatMoney(cut.net_sales)}</strong>
+      </div>
+    </div>
+    <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>🍿 (-) Gastos de Snack:</span>
+        <strong>-${formatMoney(expSnack)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:4px 0;">
+        <span>🚗 (-) Gastos de Estacionamiento:</span>
+        <strong>-${formatMoney(expParking)}</strong>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin:6px 0 2px 0; font-size:1.08rem; font-weight:bold;">
+        <span>(=) TOTAL DINERO LIBRE:</span>
+        <span>${formatMoney(freeMoney)}</span>
       </div>
     </div>
     <div style="border-bottom:1px dashed #9ca3af; padding-bottom:8px; margin-bottom:8px;">
@@ -3373,7 +3948,7 @@ function showClosedCutTicketModal(cut) {
         <strong>${formatMoney(cut.transfer_sales)}</strong>
       </div>
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
-        <span>💵 Efectivo Esperado en Caja:</span>
+        <span>💵 Efectivo Esperado (Tras Gastos):</span>
         <strong>${formatMoney(cut.expected_cash)}</strong>
       </div>
       <div style="display:flex; justify-content:space-between; margin:4px 0;">
@@ -3507,12 +4082,14 @@ async function loadSales() {
   const cashierFilter =
     state.currentUser.role === 'admin' ? state.selectedCashierFilter : String(state.currentUser.id);
   const rangeInfo = getActiveHistoryDateRange();
-  const [sales, cashCuts] = await Promise.all([
+  const [sales, cashCuts, expensesData] = await Promise.all([
     DataService.getSales(rangeInfo.startDate, rangeInfo.endDate, cashierFilter),
     DataService.getCashCuts(rangeInfo.startDate, rangeInfo.endDate, cashierFilter),
+    DataService.getExpensesData(rangeInfo.startDate, rangeInfo.endDate),
   ]);
   state.sales = sales;
   state.cashCuts = cashCuts;
+  state.expensesData = expensesData;
   renderSalesHistory();
 }
 
@@ -3976,6 +4553,86 @@ async function initApp() {
   document.getElementById('btn-print-corte').addEventListener('click', showDailyCorteModal);
   document.getElementById('btn-print-receipt').addEventListener('click', () => window.print());
 
+  // Eventos del Módulo de Gastos (Recurrentes con opción a quitar un día + Puntuales Diarios)
+  function openExpenseModal() {
+    document.getElementById('form-expense').reset();
+    document.getElementById('expense-type').value = 'puntual';
+    document.getElementById('expense-category').value = 'snack';
+    const rangeInfo = getActiveHistoryDateRange();
+    document.getElementById('expense-date').value = rangeInfo.startDate || getTodayLocalISO();
+    document.getElementById('expense-date-group').classList.remove('hidden');
+    document.getElementById('modal-expense').classList.remove('hidden');
+    setTimeout(() => document.getElementById('expense-concept').focus(), 80);
+  }
+
+  const btnOpenExpenseModal = document.getElementById('btn-open-expense-modal');
+  if (btnOpenExpenseModal) btnOpenExpenseModal.addEventListener('click', openExpenseModal);
+  const btnOpenExpenseInline = document.getElementById('btn-open-expense-inline');
+  if (btnOpenExpenseInline) btnOpenExpenseInline.addEventListener('click', openExpenseModal);
+
+  const expTypeSelect = document.getElementById('expense-type');
+  if (expTypeSelect) {
+    expTypeSelect.addEventListener('change', (e) => {
+      document.getElementById('expense-date-group').classList.toggle('hidden', e.target.value === 'recurrente');
+    });
+  }
+
+  document.querySelectorAll('.btn-expense-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.getElementById('expense-concept').value = btn.dataset.concept || '';
+      document.getElementById('expense-category').value = btn.dataset.cat || 'snack';
+      document.getElementById('expense-type').value = btn.dataset.type || 'puntual';
+      document.getElementById('expense-date-group').classList.toggle('hidden', btn.dataset.type === 'recurrente');
+      document.getElementById('expense-amount').focus();
+    });
+  });
+
+  const formExpense = document.getElementById('form-expense');
+  if (formExpense) {
+    formExpense.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const submitBtn = document.getElementById('btn-save-expense');
+      if (submitBtn && submitBtn.disabled) return;
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Guardando...';
+      }
+      try {
+        const expType = document.getElementById('expense-type').value;
+        const cat = document.getElementById('expense-category').value;
+        const concept = document.getElementById('expense-concept').value.trim();
+        const amount = Number(document.getElementById('expense-amount').value || 0);
+        const expDate = document.getElementById('expense-date').value || getTodayLocalISO();
+        if (!concept || amount <= 0) return;
+
+        await DataService.saveExpense({
+          expense_type: expType,
+          category: cat,
+          concept,
+          amount,
+          expense_date: expDate,
+          cashier_id: state.currentUser ? state.currentUser.id : null,
+          cashier_name: state.currentUser ? state.currentUser.name : 'General',
+        });
+
+        document.getElementById('modal-expense').classList.add('hidden');
+        await loadSales();
+        showToast(
+          expType === 'recurrente'
+            ? `🔄 Gasto diario recurrente "${concept}" (-${formatMoney(amount)}/día) activado`
+            : `💸 Gasto "${concept}" (-${formatMoney(amount)}) registrado`
+        );
+      } catch (err) {
+        showToast(`❌ Error al guardar gasto: ${err.message}`);
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '💾 Guardar Gasto';
+        }
+      }
+    });
+  }
+
   const btnOpenCloseCut = document.getElementById('btn-open-close-cut');
   if (btnOpenCloseCut) {
     btnOpenCloseCut.addEventListener('click', openCloseCutModal);
@@ -4007,10 +4664,14 @@ async function initApp() {
 
       const noteVal = document.getElementById('close-cut-note').value.trim();
       document.getElementById('close-cut-confirm-detail').innerHTML =
-        `Se cerrarán <strong>${activeCutDraft.salesCount} venta(s)</strong> con un Total Neto de <strong>${formatMoney(
+        `Se cerrarán <strong>${activeCutDraft.salesCount} venta(s)</strong> (Ventas Netas: <strong>${formatMoney(
           activeCutDraft.netSales
-        )}</strong>.<br/>` +
-        `💵 Efectivo esperado: <strong>${formatMoney(activeCutDraft.expectedCash)}</strong><br/>` +
+        )}</strong>).<br/>` +
+        `🍿 Gastos Snack: <strong>-${formatMoney(activeCutDraft.expensesSnack)}</strong> | 🚗 Gastos Estac.: <strong>-${formatMoney(
+          activeCutDraft.expensesParking
+        )}</strong><br/>` +
+        `✨ <strong>TOTAL DINERO LIBRE: ${formatMoney(activeCutDraft.freeMoney)}</strong><br/>` +
+        `💵 Efectivo esperado (tras gastos): <strong>${formatMoney(activeCutDraft.expectedCash)}</strong><br/>` +
         `💵 Efectivo entregado: <strong>${formatMoney(countedCash)}</strong> (${diffMsg}).` +
         (noteVal ? `<br/>📝 Nota: <em>${escapeHtml(noteVal)}</em>` : '') +
         `<br/><br/>Al confirmar, se generará el comprobante de corte y la caja activa iniciará en <strong>$0.00</strong>.`;
@@ -4062,6 +4723,10 @@ async function initApp() {
           counted_cash: countedCash,
           card_sales: activeCutDraft.cardSales,
           transfer_sales: activeCutDraft.transferSales,
+          expenses_snack: activeCutDraft.expensesSnack,
+          expenses_parking: activeCutDraft.expensesParking,
+          expenses_total: activeCutDraft.expensesTotal,
+          free_money: activeCutDraft.freeMoney,
           note: document.getElementById('close-cut-note').value.trim(),
           sale_ids: activeCutDraft.saleIds,
         });

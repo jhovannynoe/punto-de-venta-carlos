@@ -649,7 +649,12 @@ async function handleApi(req, res, urlObj) {
                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                  transfer_sales::float AS transfer_sales, note, created_at
+                  transfer_sales::float AS transfer_sales,
+                  COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                  COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                  COALESCE(expenses_total, 0)::float AS expenses_total,
+                  COALESCE(free_money, net_sales)::float AS free_money,
+                  note, created_at
            FROM cash_cuts
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -663,7 +668,12 @@ async function handleApi(req, res, urlObj) {
                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                  transfer_sales::float AS transfer_sales, note, created_at
+                  transfer_sales::float AS transfer_sales,
+                  COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                  COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                  COALESCE(expenses_total, 0)::float AS expenses_total,
+                  COALESCE(free_money, net_sales)::float AS free_money,
+                  note, created_at
            FROM cash_cuts
            WHERE (created_at AT TIME ZONE 'America/Mexico_City')::date >= $1::date
              AND (created_at AT TIME ZONE 'America/Mexico_City')::date <= $2::date
@@ -676,7 +686,12 @@ async function handleApi(req, res, urlObj) {
                   refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                   expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                   cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                  transfer_sales::float AS transfer_sales, note, created_at
+                  transfer_sales::float AS transfer_sales,
+                  COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                  COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                  COALESCE(expenses_total, 0)::float AS expenses_total,
+                  COALESCE(free_money, net_sales)::float AS free_money,
+                  note, created_at
            FROM cash_cuts
            ORDER BY created_at DESC
            LIMIT 100`
@@ -698,6 +713,10 @@ async function handleApi(req, res, urlObj) {
       const cashDifference = Number((countedCash - expectedCash).toFixed(2));
       const cardSales = Number(body.card_sales || 0);
       const transferSales = Number(body.transfer_sales || 0);
+      const expensesSnack = Number(body.expenses_snack || 0);
+      const expensesParking = Number(body.expenses_parking || 0);
+      const expensesTotal = Number(body.expenses_total ?? expensesSnack + expensesParking);
+      const freeMoney = Number(body.free_money ?? netSales - expensesTotal);
       const note = String(body.note || '').trim();
       const saleIds = Array.isArray(body.sale_ids)
         ? body.sale_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
@@ -706,14 +725,20 @@ async function handleApi(req, res, urlObj) {
       const rows = await query(
         `INSERT INTO cash_cuts (
            cashier_id, cashier_name, sales_count, gross_sales, refunded_total,
-           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales, note
+           net_sales, expected_cash, counted_cash, cash_difference, card_sales, transfer_sales,
+           expenses_snack, expenses_parking, expenses_total, free_money, note
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          RETURNING id, cashier_id, cashier_name, sales_count, gross_sales::float AS gross_sales,
                    refunded_total::float AS refunded_total, net_sales::float AS net_sales,
                    expected_cash::float AS expected_cash, counted_cash::float AS counted_cash,
                    cash_difference::float AS cash_difference, card_sales::float AS card_sales,
-                   transfer_sales::float AS transfer_sales, note, created_at`,
+                   transfer_sales::float AS transfer_sales,
+                   COALESCE(expenses_snack, 0)::float AS expenses_snack,
+                   COALESCE(expenses_parking, 0)::float AS expenses_parking,
+                   COALESCE(expenses_total, 0)::float AS expenses_total,
+                   COALESCE(free_money, net_sales)::float AS free_money,
+                   note, created_at`,
         [
           cashierId,
           cashierName,
@@ -726,6 +751,10 @@ async function handleApi(req, res, urlObj) {
           cashDifference,
           cardSales,
           transferSales,
+          expensesSnack,
+          expensesParking,
+          expensesTotal,
+          freeMoney,
           note,
         ]
       );
@@ -736,6 +765,139 @@ async function handleApi(req, res, urlObj) {
       }
 
       return sendJson(res, 201, cut);
+    }
+
+    // GASTOS (RECURRENTES CON OPCIÓN A QUITAR UN DÍA + PUNTUALES DIARIOS, DIVIDIDOS EN SNACK Y ESTACIONAMIENTO)
+    if (pathname === '/api/expenses' && method === 'GET') {
+      const startDateParam = urlObj.searchParams.get('start_date');
+      const endDateParam = urlObj.searchParams.get('end_date') || startDateParam;
+
+      let punctualRows;
+      if (startDateParam && endDateParam) {
+        punctualRows = await query(
+          `SELECT id, concept, category, amount::float AS amount,
+                  expense_date::text AS expense_date, cashier_id, cashier_name, cut_id, created_at
+           FROM expenses
+           WHERE expense_date >= $1::date AND expense_date <= $2::date
+           ORDER BY expense_date DESC, created_at DESC`,
+          [startDateParam, endDateParam]
+        );
+      } else {
+        punctualRows = await query(
+          `SELECT id, concept, category, amount::float AS amount,
+                  expense_date::text AS expense_date, cashier_id, cashier_name, cut_id, created_at
+           FROM expenses
+           ORDER BY expense_date DESC, created_at DESC
+           LIMIT 300`
+        );
+      }
+
+      const recurringRows = await query(
+        `SELECT id, concept, category, amount::float AS amount, active,
+                (created_at AT TIME ZONE 'America/Mexico_City')::date::text AS start_date, created_at
+         FROM recurring_expenses
+         WHERE active = TRUE
+         ORDER BY id ASC`
+      );
+
+      let skipRows = [];
+      if (startDateParam && endDateParam) {
+        skipRows = await query(
+          `SELECT id, recurring_id, skip_date::text AS skip_date, skipped_by, created_at
+           FROM recurring_expense_skips
+           WHERE skip_date >= $1::date AND skip_date <= $2::date`,
+          [startDateParam, endDateParam]
+        );
+      } else {
+        skipRows = await query(
+          `SELECT id, recurring_id, skip_date::text AS skip_date, skipped_by, created_at
+           FROM recurring_expense_skips
+           ORDER BY skip_date DESC
+           LIMIT 300`
+        );
+      }
+
+      return sendJson(res, 200, {
+        punctual: punctualRows,
+        recurring: recurringRows,
+        skips: skipRows,
+      });
+    }
+
+    if (pathname === '/api/expenses' && method === 'POST') {
+      const body = await parseBody(req);
+      const expenseType = body.expense_type === 'recurrente' ? 'recurrente' : 'puntual';
+      const concept = String(body.concept || '').trim();
+      const category = body.category === 'estacionamiento' ? 'estacionamiento' : 'snack';
+      const amount = Number(body.amount || 0);
+      const expenseDate = body.expense_date || new Date().toISOString().slice(0, 10);
+      const cashierId = body.cashier_id ? Number(body.cashier_id) : null;
+      const cashierName = String(body.cashier_name || 'General').trim();
+
+      if (!concept || amount <= 0) {
+        return sendJson(res, 400, { error: 'Concepto y monto mayor a 0 son obligatorios' });
+      }
+
+      if (expenseType === 'recurrente') {
+        const rows = await query(
+          `INSERT INTO recurring_expenses (concept, category, amount, active)
+           VALUES ($1, $2, $3, TRUE)
+           RETURNING id, concept, category, amount::float AS amount, active,
+                     (created_at AT TIME ZONE 'America/Mexico_City')::date::text AS start_date, created_at`,
+          [concept, category, amount]
+        );
+        return sendJson(res, 201, { type: 'recurrente', item: rows[0] });
+      } else {
+        const rows = await query(
+          `INSERT INTO expenses (concept, category, amount, expense_date, cashier_id, cashier_name)
+           VALUES ($1, $2, $3, $4::date, $5, $6)
+           RETURNING id, concept, category, amount::float AS amount,
+                     expense_date::text AS expense_date, cashier_id, cashier_name, cut_id, created_at`,
+          [concept, category, amount, expenseDate, cashierId, cashierName]
+        );
+        return sendJson(res, 201, { type: 'puntual', item: rows[0] });
+      }
+    }
+
+    if (pathname === '/api/expenses/recurring-skip' && method === 'POST') {
+      const body = await parseBody(req);
+      const recurringId = Number(body.recurring_id);
+      const skipDate = String(body.skip_date || '').trim();
+      const skip = Boolean(body.skip);
+      const skippedBy = String(body.skipped_by || 'General').trim();
+
+      if (!recurringId || !skipDate) {
+        return sendJson(res, 400, { error: 'Datos incompletos para omitir gasto recurrente' });
+      }
+
+      if (skip) {
+        await query(
+          `INSERT INTO recurring_expense_skips (recurring_id, skip_date, skipped_by)
+           VALUES ($1, $2::date, $3)
+           ON CONFLICT (recurring_id, skip_date) DO NOTHING`,
+          [recurringId, skipDate, skippedBy]
+        );
+      } else {
+        await query(
+          `DELETE FROM recurring_expense_skips WHERE recurring_id = $1 AND skip_date = $2::date`,
+          [recurringId, skipDate]
+        );
+      }
+      return sendJson(res, 200, { ok: true, recurring_id: recurringId, skip_date: skipDate, skipped: skip });
+    }
+
+    const expDelMatch = pathname.match(/^\/api\/expenses\/(\d+)$/);
+    if (expDelMatch && method === 'DELETE') {
+      const id = Number(expDelMatch[1]);
+      await query('DELETE FROM expenses WHERE id = $1', [id]);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    const recDelMatch = pathname.match(/^\/api\/expenses\/recurring\/(\d+)$/);
+    if (recDelMatch && method === 'DELETE') {
+      const id = Number(recDelMatch[1]);
+      await query('UPDATE recurring_expenses SET active = FALSE WHERE id = $1', [id]);
+      return sendJson(res, 200, { ok: true });
     }
 
     // LOGS DE DIAGNÓSTICO TRAS BAMBALINAS (Con vigencia automática de 15 días)

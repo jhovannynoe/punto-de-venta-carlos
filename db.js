@@ -182,6 +182,48 @@ export async function initDatabase() {
   `);
   await query(`DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL '15 days';`);
 
+  // 9. Tablas de Gastos (Recurrentes con opción a quitar un día + Gastos Diarios Puntuales, divididos en Snack y Estacionamiento)
+  await query(`
+    CREATE TABLE IF NOT EXISTS recurring_expenses (
+      id SERIAL PRIMARY KEY,
+      concept TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'estacionamiento',
+      amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS recurring_expense_skips (
+      id SERIAL PRIMARY KEY,
+      recurring_id INTEGER NOT NULL REFERENCES recurring_expenses(id) ON DELETE CASCADE,
+      skip_date DATE NOT NULL,
+      skipped_by TEXT DEFAULT 'General',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(recurring_id, skip_date)
+    );
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      concept TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'snack',
+      amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+      expense_date DATE NOT NULL DEFAULT (NOW() AT TIME ZONE 'America/Mexico_City')::date,
+      cashier_id INTEGER,
+      cashier_name TEXT DEFAULT 'General',
+      cut_id INTEGER DEFAULT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await query(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_snack NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_parking NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS expenses_total NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE cash_cuts ADD COLUMN IF NOT EXISTS free_money NUMERIC(10, 2) NOT NULL DEFAULT 0;`);
+
   // 5. Tabla de conceptos por venta
   await query(`
     CREATE TABLE IF NOT EXISTS sale_items (

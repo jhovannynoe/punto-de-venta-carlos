@@ -7,7 +7,7 @@
   <title>Punto de Venta Carlos | Web & APK</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="manifest" href="manifest.json" />
-  <link rel="stylesheet" href="styles.css?v=14" />
+  <link rel="stylesheet" href="styles.css?v=15" />
 </head>
 <body>
   <!-- PANTALLA DE ACCESO (LOGIN POR CAJERO / ADMIN) -->
@@ -225,6 +225,7 @@
             </div>
 
             <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar</button>
+            <button id="btn-open-expense-modal" class="btn btn-primary">💸 + Registrar Gasto</button>
             <button id="btn-print-corte" class="btn btn-accent">🖨️ Imprimir Reporte</button>
             <button id="btn-open-close-cut" class="btn btn-success">🔒 Cerrar Turno / Caja</button>
           </div>
@@ -234,14 +235,14 @@
 
         <div class="kpi-grid">
           <div class="kpi-card kpi-total">
-            <span class="kpi-label">Total Neto en Caja</span>
+            <span class="kpi-label">Dinero en Caja (Ventas Netas)</span>
             <strong id="kpi-total-sales" class="kpi-value">$0.00</strong>
             <span id="kpi-sales-count" class="kpi-sub">0 ventas registradas</span>
           </div>
           <div class="kpi-card kpi-cash">
-            <span class="kpi-label">💵 Efectivo Neto</span>
+            <span class="kpi-label">💵 Efectivo Bruto Ventas</span>
             <strong id="kpi-cash-sales" class="kpi-value">$0.00</strong>
-            <span class="kpi-sub">Dinero físico a entregar</span>
+            <span class="kpi-sub">Cobros en efectivo antes de gastos</span>
           </div>
           <div class="kpi-card kpi-card">
             <span class="kpi-label">💳 Tarjeta / Transferencia</span>
@@ -253,6 +254,59 @@
             <strong id="kpi-returns-total" class="kpi-value">-$0.00</strong>
             <span id="kpi-returns-count" class="kpi-sub">0 devoluciones hoy</span>
           </div>
+        </div>
+
+        <!-- BALANCE DE GASTOS (SNACK / ESTACIONAMIENTO) Y TOTAL DE DINERO LIBRE -->
+        <div class="kpi-grid expenses-kpi-grid">
+          <div class="kpi-card kpi-exp-snack">
+            <span class="kpi-label">🍿 (-) Gastos de Snack</span>
+            <strong id="kpi-expenses-snack" class="kpi-value">-$0.00</strong>
+            <span id="kpi-expenses-snack-sub" class="kpi-sub">Compras e insumos de snack</span>
+          </div>
+          <div class="kpi-card kpi-exp-parking">
+            <span class="kpi-label">🚗 (-) Gastos de Estacionamiento</span>
+            <strong id="kpi-expenses-parking" class="kpi-value">-$0.00</strong>
+            <span id="kpi-expenses-parking-sub" class="kpi-sub">Sueldo tendero y operación</span>
+          </div>
+          <div class="kpi-card kpi-free-money">
+            <span class="kpi-label">✨ (=) TOTAL DE DINERO LIBRE</span>
+            <strong id="kpi-free-money-total" class="kpi-value">$0.00</strong>
+            <span id="kpi-free-money-sub" class="kpi-sub">Caja − Gastos Snack − Gastos Estac.</span>
+          </div>
+          <div class="kpi-card kpi-free-cash">
+            <span class="kpi-label">💵 Efectivo Libre en Mano</span>
+            <strong id="kpi-free-cash-hand" class="kpi-value">$0.00</strong>
+            <span class="kpi-sub">Efectivo físico tras pagar gastos</span>
+          </div>
+        </div>
+
+        <!-- PANEL DE GASTOS RECURRENTES Y GASTOS PUNTUALES DEL PERIODO -->
+        <div id="expenses-section-box" class="table-container" style="margin-bottom: 1.5rem;">
+          <div class="period-summary-header">
+            <div>
+              <strong>💸 Desglose de Gastos (Recurrentes y Diarios Puntuales)</strong>
+              <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">
+                Los gastos recurrentes (ej. Sueldo del tendero) se aplican diario con opción a quitar un día si no acude.
+              </div>
+            </div>
+            <button type="button" id="btn-open-expense-inline" class="btn btn-primary btn-sm">
+              + Nuevo Gasto
+            </button>
+          </div>
+          <div id="recurring-expenses-bar" class="recurring-expenses-bar"></div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Fecha / Tipo</th>
+                <th>Concepto del Gasto</th>
+                <th>Propiedad / Área</th>
+                <th>Registró</th>
+                <th>Monto</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="expenses-table-tbody"></tbody>
+          </table>
         </div>
 
         <div id="admin-cashier-breakdown-box" class="table-container admin-only hidden" style="margin-bottom: 1.5rem;">
@@ -284,11 +338,11 @@
             <thead>
               <tr>
                 <th id="period-col-header">Periodo</th>
-                <th>Ventas Realizadas</th>
-                <th>💵 Efectivo Neto</th>
-                <th>💳 Tarjeta / Transf.</th>
-                <th>↩️ Devoluciones</th>
-                <th>Total Neto</th>
+                <th>Ventas</th>
+                <th>💰 Ventas Netas</th>
+                <th>🍿 (-) Gastos Snack</th>
+                <th>🚗 (-) Gastos Estac.</th>
+                <th>✨ (=) Total Dinero Libre</th>
               </tr>
             </thead>
             <tbody id="period-summary-tbody"></tbody>
@@ -305,11 +359,12 @@
               <tr>
                 <th>Corte / Hora</th>
                 <th>Cajero / Alcance</th>
-                <th>Ventas</th>
-                <th>💵 Efectivo Esperado</th>
+                <th>💰 Ventas Netas</th>
+                <th>🍿 Gastos Snack</th>
+                <th>🚗 Gastos Estac.</th>
+                <th>✨ Dinero Libre</th>
                 <th>💵 Efectivo Entregado</th>
                 <th>Diferencia</th>
-                <th>Total Neto</th>
                 <th>Comprobante</th>
               </tr>
             </thead>
@@ -726,12 +781,21 @@
         <div id="close-cut-step-1-fields" style="display:flex; flex-direction:column; gap:0.8rem;">
           <div class="close-cut-summary-grid">
             <div class="close-cut-stat">
-              <span>Ventas a cerrar</span>
-              <strong id="close-cut-sales-count">0 ventas</strong>
+              <span>Dinero en Caja (Ventas)</span>
+              <strong id="close-cut-net-total" style="color:var(--primary);">$0.00</strong>
+              <span id="close-cut-sales-count" style="font-size:0.72rem;">0 ventas</span>
             </div>
             <div class="close-cut-stat">
-              <span>Total Neto del Turno</span>
-              <strong id="close-cut-net-total" style="color:var(--primary);">$0.00</strong>
+              <span>🍿 (-) Gastos Snack</span>
+              <strong id="close-cut-exp-snack" style="color:#fcd34d;">-$0.00</strong>
+            </div>
+            <div class="close-cut-stat">
+              <span>🚗 (-) Gastos Estacionamiento</span>
+              <strong id="close-cut-exp-parking" style="color:#f9a8d4;">-$0.00</strong>
+            </div>
+            <div class="close-cut-stat">
+              <span>✨ (=) TOTAL DINERO LIBRE</span>
+              <strong id="close-cut-free-money" style="color:var(--success);">$0.00</strong>
             </div>
             <div class="close-cut-stat">
               <span>💳 Tarjeta / Transf.</span>
@@ -744,7 +808,7 @@
           </div>
 
           <div class="checkout-total-banner" style="padding:0.75rem 1rem;">
-            <span>💵 Efectivo Esperado en Caja</span>
+            <span>💵 Efectivo Esperado en Caja (Tras Gastos)</span>
             <strong id="close-cut-expected-cash">$0.00</strong>
           </div>
 
@@ -796,6 +860,65 @@
     </div>
   </div>
 
+  <!-- MODAL: REGISTRAR GASTO (RECURRENTE O PUNTUAL / SNACK O ESTACIONAMIENTO) -->
+  <div id="modal-expense" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>💸 Registrar Gasto</h3>
+          <p class="subtitle">Se descontará del corte para calcular el Dinero Libre</p>
+        </div>
+        <button class="modal-close" data-close="modal-expense">✕</button>
+      </div>
+      <form id="form-expense" class="modal-body">
+        <div class="form-group">
+          <label class="field-label" for="expense-type">1. Tipo de Gasto *</label>
+          <select id="expense-type" class="input">
+            <option value="puntual">🛒 Gasto Diario / Puntual (Solo para compras o pagos de hoy)</option>
+            <option value="recurrente">🔄 Gasto Diario Recurrente (Ej. Sueldo del tendero: aplica diario con opción a quitar un día)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label" for="expense-category">2. Propiedad / Área del Gasto *</label>
+          <select id="expense-category" class="input">
+            <option value="snack">🍿 Snack (Compras de snack, refrescos, insumos...)</option>
+            <option value="estacionamiento">🚗 Estacionamiento (Sueldo del tendero, mantenimiento, servicios...)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label" for="expense-concept">3. Concepto o Descripción *</label>
+          <input type="text" id="expense-concept" class="input" placeholder="Ej. Sueldo del tendero, Compra de Sabritas y Cocas..." required />
+          <div class="quick-reason-chips">
+            <button type="button" class="chip-btn btn-expense-chip" data-concept="Sueldo del tendero" data-cat="estacionamiento" data-type="recurrente">🔄 Sueldo del tendero</button>
+            <button type="button" class="chip-btn btn-expense-chip" data-concept="Compra de insumos Snack" data-cat="snack" data-type="puntual">🍿 Insumos Snack</button>
+            <button type="button" class="chip-btn btn-expense-chip" data-concept="Refrescos y bebidas" data-cat="snack" data-type="puntual">🥤 Refrescos</button>
+            <button type="button" class="chip-btn btn-expense-chip" data-concept="Limpieza / Mantenimiento" data-cat="estacionamiento" data-type="puntual">🚗 Limpieza Estac.</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="field-label" for="expense-amount">4. Monto del Gasto ($) *</label>
+            <input type="number" id="expense-amount" class="input input-lg" step="0.01" min="0.01" placeholder="0.00" required />
+          </div>
+          <div id="expense-date-group" class="form-group">
+            <label class="field-label" for="expense-date">Fecha del gasto</label>
+            <input type="date" id="expense-date" class="input" />
+          </div>
+        </div>
+
+        <div class="modal-footer" style="padding:0.65rem 0 0 0;">
+          <button type="button" class="btn btn-secondary" data-close="modal-expense">Cancelar</button>
+          <button type="submit" id="btn-save-expense" class="btn btn-primary btn-lg">
+            💾 Guardar Gasto
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- MODAL: TICKET / CORTE IMPRIMIBLE -->
   <div id="modal-receipt" class="modal-backdrop hidden">
     <div class="modal-card">
@@ -824,11 +947,11 @@
           window.location.reload();
         }
       });
-      navigator.serviceWorker.register('/sw.js?v=14').then((reg) => {
+      navigator.serviceWorker.register('/sw.js?v=15').then((reg) => {
         reg.update().catch(() => {});
       }).catch(() => {});
     }
   </script>
-  <script src="app.js?v=14" type="module"></script>
+  <script src="app.js?v=15" type="module"></script>
 </body>
 </html>
